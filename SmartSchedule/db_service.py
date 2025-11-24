@@ -6,14 +6,14 @@ from datetime import datetime, time, timedelta, timezone
 class DBService:
     """
     Handles all interactions with the MongoDB collections (users, tasks, etc.).
-    All public methods use the user's string-based ObjectId.
+    REVISED: Removed temporary user_defined_blocks fields and methods.
     """
 
     def __init__(self, db_connection):
         self.db = db_connection
         self.users_collection = self.db["users"]
 
-    # --- INTERNAL HELPER ---
+    # --- INTERNAL HELPER (Retained) ---
     def _parse_deadline_to_aware(self, item):
         """Helper to convert task/test deadline strings to timezone-aware datetime objects."""
         deadline_str = item.get("deadline", item.get("date"))
@@ -23,21 +23,17 @@ class DBService:
 
         try:
             dt = datetime.fromisoformat(deadline_str)
-            # If naive, assume it's in UTC (standard for server-side persistence)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except ValueError:
             return None
 
-    # --- END INTERNAL HELPER ---
-
-    # --- TOKEN-SAVING READ OPERATION ---
+    # --- TOKEN-SAVING READ OPERATION (Retained) ---
 
     def get_active_context_data(self, user_id, now_dt):
         """
-        Fetches user data and prunes tasks/tests to include only items relevant
-        to the next 30 days or those marked as 'top' priority.
+        Fetches user data, pruning tasks/tests.
         """
         user_data = self.get_user_data(user_id)
         if not user_data:
@@ -49,7 +45,6 @@ class DBService:
         for task in user_data.get("tasks", []):
             deadline = self._parse_deadline_to_aware(task)
             priority = task.get("priority")
-
             if deadline and (deadline < cutoff_dt or priority == "top"):
                 active_tasks.append(task)
 
@@ -57,7 +52,6 @@ class DBService:
         for test in user_data.get("tests", []):
             deadline = self._parse_deadline_to_aware(test)
             priority = test.get("priority")
-
             if deadline and (deadline < cutoff_dt or priority == "top"):
                 active_tests.append(test)
 
@@ -66,14 +60,13 @@ class DBService:
             "tasks": active_tasks,
             "tests": active_tests,
             "preferences": user_data.get("preferences", {}),
-            "study_windows": user_data.get("study_windows", [])
         }
 
         return pruned_context
 
-    # --- END NEW READ OPERATION ---
+    # --- DELETED: add_user_defined_block and clear_user_defined_blocks methods ---
 
-    # --- NEW CRUD OPERATIONS ---
+    # --- ORIGINAL READ/WRITE OPERATIONS (Retained) ---
     def set_onboarding_complete(self, user_id, status):
         """Sets the onboarding status flag for the user."""
         result = self.users_collection.update_one(
@@ -82,12 +75,10 @@ class DBService:
         )
         return result.modified_count > 0
 
-    # --- ORIGINAL READ OPERATIONS (Kept for compatibility) ---
     def get_user_data(self, user_id):
         """Fetches all user data by ObjectId."""
         return self.users_collection.find_one({"_id": ObjectId(user_id)})
 
-    # --- ORIGINAL CRUD OPERATIONS (Unchanged functionality) ---
     def update_user_preference(self, user_id, preferences):
         """Saves awake and sleep time preferences."""
         result = self.users_collection.update_one(
@@ -103,7 +94,6 @@ class DBService:
         elif data_type == "task":
             update_field = "tasks"
         elif data_type == "test":
-            # Convert test 'date' to a full 'deadline' for consistency
             data['deadline'] = f"{data['date']}T23:59:59"
             update_field = "tests"
         else:
@@ -181,16 +171,6 @@ class DBService:
 
         return (result_class.modified_count > 0 or result_task.modified_count > 0 or
                 result_test.modified_count > 0 or result_plan.modified_count > 0)
-
-    def save_study_windows(self, user_id, windows):
-        """Saves new study windows by PUSHING (adding) them to the array."""
-
-        # CRITICAL FIX: Use $push instead of $set
-        result = self.users_collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$push": {"study_windows": {"$each": windows}}}  # Use $each for array items
-        )
-        return result.modified_count > 0
 
     def update_generated_plan(self, user_id, new_plan):
         """Saves the result of the planning engine."""

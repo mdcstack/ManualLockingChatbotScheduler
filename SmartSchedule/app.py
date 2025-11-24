@@ -36,22 +36,21 @@ planner_engine = PlannerEngine(db_service)
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# === CONCISE SYSTEM PROMPT (FIXED REJECTION LOGIC) ===
+# === CONCISE SYSTEM PROMPT (FIXED for Recurrence) ===
 
 SYSTEM_PROMPT = """
-You are a 'Study Schedule Maker' assistant. Your sole goal is to translate user requests into structured function calls to generate a recurring study schedule.
+You are a 'Study Schedule Maker' assistant. Your sole goal is to translate user requests into structured function calls to manage their schedule.
 
 **CORE DIRECTIVES (NON-NEGOTIABLE):**
-1.  **TIME ANCHOR:** The current date and time is provided via a system message ("CRITICAL: The current date and time is [Date & Time]"). You MUST use this as the absolute reference for all date math.
-2.  **REJECTION RULE (CRITICAL FIX):** If the **FINAL DEADLINE** for the task or test is *before* the current time, you MUST NOT call any tool. Respond: "Sorry, I can't add items for dates and times that have already passed. Please provide a future deadline."
-3.  **DATA CLARIFICATION:** If any tool (e.g., save_task) requires essential data (Name, Deadline, Day) and the user's request is ambiguous or missing information, you MUST ask clarifying questions to get the missing data. NEVER guess or fill in blanks.
-
-**PLANNER LOGIC FLOW:**
-1.  **DATA ENTRY:** Use `save_class`, `save_task`, or `save_test` as requested. The user defines their recurring study times via the prompt.
-2.  **PLAN GENERATION:** After saving any task or test item, you MUST call the `run_planner_engine()` tool to immediately generate the recurring schedule.
+1.  **SEQUENCING (CRITICAL FIX):** If the user mentions a new item or deadline (e.g., 'midterm', 'assignment'), you MUST call `save_task` or `save_test` first to create the item. 
+2.  **RECURRENCE (LOW COST):** If the user provides recurring study times (e.g., "Mondays and Wednesdays from 4 PM to 6 PM"), you MUST immediately follow up with a single call to `schedule_recurring_blocks` to capture ALL recurring study times in one step.
+3.  **TIME ANCHOR:** The current date and time is provided via a system message ("CRITICAL: The current date and time is [Date & Time]"). You MUST use this to resolve dates.
+4.  **DATE OUTPUT FORMAT:** Output dates in **YYYY-MM-DD** format and time in **HH:MM** format for all tools.
+5.  **REJECTION RULE:** If the deadline is *before* the current time, respond: "Sorry, I can't add items for dates and times that have already passed."
+6.  **PLANNER FLOW:** After saving any task, test, or specific study block, you MUST call the `run_planner_engine()` tool to immediately regenerate the schedule.
 """
 
-# === VASTLY SIMPLIFIED TOOL DEFINITION (Unchanged) ===
+# === VASTLY SIMPLIFIED TOOL DEFINITION (Updated for Recurrence) ===
 tools = [
     {
         "type": "function",
@@ -181,25 +180,23 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "save_study_windows",
-            "description": "Saves the user's ideal weekly study windows (days and times) for schedule generation. This is cumulative.",
+            "name": "schedule_recurring_blocks",
+            "description": "Saves a set of recurring study blocks for a specific task until its deadline.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "windows": {
+                    "item_name": {"type": "string", "description": "The exact name of the task or test."},
+                    "days": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "day": {"type": "string", "description": "e.g., Monday, Tuesday"},
-                                "start_time": {"type": "string", "description": "HH:MM format"},
-                                "end_time": {"type": "string", "description": "HH:MM format"},
-                            },
-                            "required": ["day", "start_time", "end_time"]
-                        }
-                    }
+                        "items": {"type": "string",
+                                  "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+                                           "Sunday"]},
+                        "description": "The days of the week for the recurring block."
+                    },
+                    "start_time": {"type": "string", "description": "Start time in HH:MM format."},
+                    "end_time": {"type": "string", "description": "End time in HH:MM format."},
                 },
-                "required": ["windows"],
+                "required": ["item_name", "days", "start_time", "end_time"],
             },
         },
     },
@@ -207,7 +204,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "run_planner_engine",
-            "description": "Runs the full recurring schedule generator based on all tasks, tests, and study windows.",
+            "description": "Runs the full schedule validator and consolidation engine.",
             "parameters": {"type": "object", "properties": {}}
         }
     }
@@ -215,7 +212,6 @@ tools = [
 
 
 # ----------------- TOOL EXECUTION MAPPING -----------------
-# (Only the mappings for the surviving functions are needed)
 def map_db_update_response(func_name, result, args):
     """Generates a user-friendly response message for DB operations."""
     if func_name == "update_task_details":
@@ -251,14 +247,17 @@ function_map = {
     "update_task_details": lambda uid, args: db_service.update_task_details(uid, args),
     "update_class_schedule": lambda uid, args: db_service.update_class_schedule(uid, args),
     "delete_schedule_item": lambda uid, args: db_service.delete_schedule_item(uid, args.get("item_name")),
-    "save_study_windows": lambda uid, args: db_service.save_study_windows(uid, args.get("windows")),
+
+    # New Tool Mapping - Recurring Blocks
+    "schedule_recurring_blocks": lambda uid, args, now_dt: planner_engine.schedule_recurring_blocks(uid, args, now_dt),
+
     "run_planner_engine": lambda uid, args, now_dt: planner_engine.run_planner_engine(uid, args, now_dt),
 }
 
 
 # ---------------------------------------------------------------
 
-# ---------- AUTH ROUTES (Remains the same) ----------
+# ---------- AUTH ROUTES (Updated User Initialization) ----------
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
     if request.method == "POST":
@@ -268,17 +267,14 @@ def signup():
             return "Username already exists!"
         hashed_pw = bcrypt.generate_password_hash(password).decode("utf-8")
 
-        # --- DEVPRO FIX: Initialize onboarding_complete flag ---
         new_user = users_collection.insert_one({
             "username": username, "password": hashed_pw,
             "schedule": [], "tasks": [], "tests": [],
             "preferences": {"awake_time": "07:00", "sleep_time": "23:00"},
             "chat_history": [],
-            "study_windows": [],
             "generated_plan": [],
-            "onboarding_complete": False  # NEW FLAG
+            "onboarding_complete": False
         })
-        # --- END FIX ---
         return redirect(url_for("login"))
     return render_template("signup.html")
 
@@ -314,7 +310,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-# --- NEW: API ROUTE TO DISMISS ONBOARDING ---
+# --- API ROUTE TO DISMISS ONBOARDING ---
 @app.route("/onboarding_dismiss", methods=["POST"])
 def onboarding_dismiss():
     if "user_id" not in session:
@@ -323,9 +319,6 @@ def onboarding_dismiss():
     user_id = session["user_id"]
     db_service.set_onboarding_complete(user_id, True)
     return jsonify({"status": "acknowledged"})
-
-
-# --- END NEW ROUTE ---
 
 
 # ---------- MAIN APP ROUTES ----------
@@ -352,10 +345,9 @@ def save_personalization():
         preferences = data.get("preferences", {})
         db_service.update_user_preference(user_id, preferences)
 
-        # NOTE: Study windows removed from this route, must be set via chat.
-
         db_service.set_onboarding_complete(user_id, True)
 
+        # Run planner after saving preferences
         planner_response = planner_engine.run_planner_engine(user_id, {}, now_dt=client_now)
 
         return jsonify({"reply": f"Settings saved! {planner_response['message']}"})
@@ -420,14 +412,11 @@ def chat():
     if conversational_history and conversational_history[0].get("role") == "tool":
         conversational_history = conversational_history[1:]
 
-    # REMOVED: Daily check-in trigger logic DELETED from here.
-
     messages = messages_header + conversational_history
     messages.append({"role": "user", "content": user_message})
 
     try:
         response = openai_client.chat.completions.create(
-            # NOTE: Tool list is simplified
             model="gpt-4o-mini",
             messages=messages,
             tools=tools,
@@ -455,19 +444,29 @@ def chat():
                     response_msg_for_user = "Error: AI tried to call an unknown function."
 
                 elif function_name == "run_planner_engine":
-                    # NOTE: Planner is executed here
                     planner_response = func(user_id, arguments, client_now)
                     response_msg_for_user = planner_response.get("message", "OK, I've run the planner.")
                     run_planner = True
 
+                elif function_name == "schedule_recurring_blocks":
+                    # schedule_recurring_blocks handles all recurrence logic and triggers the planner internally
+                    planner_response = func(user_id, arguments, client_now)
+
+                    # --- MESSAGE SUPPRESSION FIX APPLIED HERE ---
+                    if planner_response.get('status') == 'success':
+                        response_msg_for_user = "Study plan successfully generated."
+                    else:
+                        # If planner fails, return the detailed error message
+                        response_msg_for_user = planner_response.get("message")
+                    # --- END FIX ---
+
                 else:
-                    # Generic DB persistence calls
+                    # Generic DB persistence calls (e.g., save_task)
                     db_result = func(user_id, arguments)
                     response_msg_for_user = map_db_update_response(function_name, db_result, arguments)
 
-                    if function_name in ["save_task", "save_test", "update_task_details", "delete_schedule_item",
-                                         "save_study_windows"]:
-                        run_planner = True
+                    if function_name in ["save_task", "save_test", "update_task_details", "delete_schedule_item"]:
+                        run_planner = True  # For tasks/tests changes, we still trigger the planner
 
                 messages.append({
                     "role": "tool",
@@ -480,10 +479,11 @@ def chat():
         else:
             reply_to_send = response_message.content
 
+        # Fallback to run planner if tasks were saved (e.g., save_task) but not the recurring block
         if run_planner and not planner_response:
-            # Fallback to run planner if tools were executed but no planner_response was captured (e.g., in batch save_task + run_planner_engine call)
             planner_response = planner_engine.run_planner_engine(user_id, {}, now_dt=client_now)
             if planner_response.get("message"):
+                # If fallback runs and succeeds, we still use the detailed message here
                 reply_to_send += f" (Note: {planner_response['message']})"
 
         db_service.users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"chat_history": messages}})
@@ -519,7 +519,6 @@ def get_schedule():
         "tests": user_data.get("tests", []),
         "generated_plan": user_data.get("generated_plan", []),
         "preferences": user_data.get("preferences", {}),
-        "study_windows": user_data.get("study_windows", []),
         "onboarding_complete": user_data.get("onboarding_complete", False)
     }
     return jsonify(schedule_data)
