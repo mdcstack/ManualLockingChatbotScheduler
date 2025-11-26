@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from db_service import DBService
 from planner_engine import PlannerEngine
-#code 24/11/2025
+#dred sar-ap
 # Load .env file
 load_dotenv(find_dotenv(), override=True)
 
@@ -36,21 +36,23 @@ planner_engine = PlannerEngine(db_service)
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# === CONCISE SYSTEM PROMPT (FIXED for Recurrence) ===
+# === NEW SYSTEM PROMPT: INTAKE SPECIALIST ===
 
 SYSTEM_PROMPT = """
-You are a 'Study Schedule Maker' assistant. Your sole goal is to translate user requests into structured function calls to manage their schedule.
+You are an 'Intake Specialist' for a study scheduler. Your ONLY goal is to gather a list of tasks, tests, and recurring study preferences from the user.
 
-**CORE DIRECTIVES (NON-NEGOTIABLE):**
-1.  **SEQUENCING (CRITICAL FIX):** If the user mentions a new item or deadline (e.g., 'midterm', 'assignment'), you MUST call `save_task` or `save_test` first to create the item. 
-2.  **RECURRENCE (LOW COST):** If the user provides recurring study times (e.g., "Mondays and Wednesdays from 4 PM to 6 PM"), you MUST immediately follow up with a single call to `schedule_recurring_blocks` to capture ALL recurring study times in one step.
-3.  **TIME ANCHOR:** The current date and time is provided via a system message ("CRITICAL: The current date and time is [Date & Time]"). You MUST use this to resolve dates.
-4.  **DATE OUTPUT FORMAT:** Output dates in **YYYY-MM-DD** format and time in **HH:MM** format for all tools.
-5.  **REJECTION RULE:** If the deadline is *before* the current time, respond: "Sorry, I can't add items for dates and times that have already passed."
-6.  **PLANNER FLOW:** After saving any task, test, or specific study block, you MUST call the `run_planner_engine()` tool to immediately regenerate the schedule.
+**CORE DIRECTIVES:**
+1.  **INTAKE PHASE:** Gather the specific details (Subject, Task Type, Deadline, and Preferred Study Days/Times).
+2.  **CONFIRMATION SUMMARY (CRITICAL):** Before calling any save tools, you MUST present a summary to the user.
+    * Format: "I'll set up [Task Name] due [Date]. We'll schedule study blocks on [Days] from [Start Time] to [End Time]. Does that look right?"
+    * Wait for the user to say "Yes" or confirm.
+3.  **EXECUTE ON CONFIRMATION:** Only call `save_task`, `save_test`, or `schedule_recurring_blocks` AFTER the user confirms the summary.
+4.  **FINALIZE:** Once the user indicates they are finished adding ALL items (e.g., "That's all", "I'm done"), call the `finalize_setup` tool.
+5.  **REJECTION:** If the user asks for non-scheduling advice, politely refuse.
+6.  **TIME ANCHOR:** The current date and time is provided in the system message.
 """
 
-# === VASTLY SIMPLIFIED TOOL DEFINITION (Updated for Recurrence) ===
+# === UPDATED TOOL DEFINITIONS (With finalize_setup) ===
 tools = [
     {
         "type": "function",
@@ -203,6 +205,14 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "finalize_setup",
+            "description": "Call this ONLY when the user confirms they have finished adding all their tasks and data. This triggers the final schedule generation and locks the chat.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_planner_engine",
             "description": "Runs the full schedule validator and consolidation engine.",
             "parameters": {"type": "object", "properties": {}}
@@ -251,6 +261,9 @@ function_map = {
     # New Tool Mapping - Recurring Blocks
     "schedule_recurring_blocks": lambda uid, args, now_dt: planner_engine.schedule_recurring_blocks(uid, args, now_dt),
 
+    # New Tool Mapping - Finalize Setup
+    "finalize_setup": lambda uid, args, now_dt: db_service.mark_setup_complete(uid),
+
     "run_planner_engine": lambda uid, args, now_dt: planner_engine.run_planner_engine(uid, args, now_dt),
 }
 
@@ -273,7 +286,8 @@ def signup():
             "preferences": {"awake_time": "07:00", "sleep_time": "23:00"},
             "chat_history": [],
             "generated_plan": [],
-            "onboarding_complete": False
+            "onboarding_complete": False,
+            "setup_complete": False  # Default to False
         })
         return redirect(url_for("login"))
     return render_template("signup.html")
@@ -362,8 +376,20 @@ def chat():
     if "user_id" not in session:
         return jsonify({"reply": "Error: Not logged in"}), 401
 
-    user_message = request.json.get("message")
     user_id = session["user_id"]
+
+    # === LOCK CHECK ===
+    # If the user has already finalized their setup, we reject further chat interactions
+    # and instruct the frontend to switch to Dashboard mode.
+    user_data_full = db_service.get_user_data(user_id)
+    if user_data_full.get("setup_complete", False):
+        return jsonify({
+            "reply": "Setup is complete. The AI is now disabled. Please use the manual controls to edit your schedule.",
+            "action": "lock_ui"
+        })
+    # ==================
+
+    user_message = request.json.get("message")
     selected_year = request.json.get("year", str(datetime.now().year))
 
     # === Timezone Fix: Get client_now for planning ===
@@ -383,7 +409,6 @@ def chat():
     # === End Timezone Fix ===
 
     # --- TOKEN SAVING IMPLEMENTATION ---
-    user_data_full = db_service.get_user_data(user_id)
     fresh_context_data = db_service.get_active_context_data(user_id, client_now)
 
     if not user_data_full or not fresh_context_data:
@@ -432,6 +457,7 @@ def chat():
         reply_to_send = ""
         run_planner = False
         planner_response = None
+        action_flag = None
 
         if response_message.tool_calls:
             for tool_call in response_message.tool_calls:
@@ -443,6 +469,15 @@ def chat():
                 if not func:
                     response_msg_for_user = "Error: AI tried to call an unknown function."
 
+                elif function_name == "finalize_setup":
+                    # 1. Mark DB as complete
+                    func(user_id, arguments, client_now)
+                    # 2. Trigger Planner
+                    run_planner = True
+                    # 3. Set Message & Action
+                    response_msg_for_user = "Setup complete! I'm now generating your final schedule and locking the manual controls."
+                    action_flag = "lock_ui"
+
                 elif function_name == "run_planner_engine":
                     planner_response = func(user_id, arguments, client_now)
                     response_msg_for_user = planner_response.get("message", "OK, I've run the planner.")
@@ -452,13 +487,10 @@ def chat():
                     # schedule_recurring_blocks handles all recurrence logic and triggers the planner internally
                     planner_response = func(user_id, arguments, client_now)
 
-                    # --- MESSAGE SUPPRESSION FIX APPLIED HERE ---
                     if planner_response.get('status') == 'success':
                         response_msg_for_user = "Study plan successfully generated."
                     else:
-                        # If planner fails, return the detailed error message
                         response_msg_for_user = planner_response.get("message")
-                    # --- END FIX ---
 
                 else:
                     # Generic DB persistence calls (e.g., save_task)
@@ -488,7 +520,12 @@ def chat():
 
         db_service.users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"chat_history": messages}})
 
-        return jsonify({"reply": reply_to_send})
+        # Construct JSON response
+        response_payload = {"reply": reply_to_send}
+        if action_flag:
+            response_payload["action"] = action_flag
+
+        return jsonify(response_payload)
 
     except Exception as e:
         print(f"Error in /chat route: {e}")
@@ -519,9 +556,106 @@ def get_schedule():
         "tests": user_data.get("tests", []),
         "generated_plan": user_data.get("generated_plan", []),
         "preferences": user_data.get("preferences", {}),
-        "onboarding_complete": user_data.get("onboarding_complete", False)
+        "onboarding_complete": user_data.get("onboarding_complete", False),
+        "setup_complete": user_data.get("setup_complete", False)  # Pass lock status to frontend
     }
     return jsonify(schedule_data)
+
+
+# app.py
+
+@app.route("/api/manual_save_item", methods=["POST"])
+def manual_save_item():
+    if "user_id" not in session:
+        return jsonify({"error": "Not logged in"}), 401
+
+    user_id = session["user_id"]
+    data = request.json
+
+    # 1. Extract Data
+    item_type = data.get("type", "assignment")  # default to assignment
+
+    # Map frontend types to backend types if necessary
+    # The modal uses 'assignment', 'project', 'seatwork', 'quiz', 'exam'
+    # db_service expects 'task' or 'test' bucket logic:
+    category = "task"
+    if item_type in ["quiz", "exam"]:
+        category = "test"
+        # For tests, we use 'test_type' and 'date'
+        payload = {
+            "name": data.get("name"),
+            "test_type": item_type,
+            "date": data.get("deadline").split("T")[0],  # Extract YYYY-MM-DD
+            "priority": data.get("priority", "medium")
+        }
+    else:
+        # For tasks, we use 'task_type' and 'deadline'
+        payload = {
+            "name": data.get("name"),
+            "task_type": item_type,
+            "deadline": data.get("deadline"),  # Keeps YYYY-MM-DDTHH:MM
+            "priority": data.get("priority", "medium")
+        }
+
+    # 2. Save to DB
+    try:
+        db_service.add_schedule_item(user_id, category, payload)
+
+        # 3. Trigger Planner Engine (Rule-Based Update)
+        # We need the current client time to ensure valid scheduling
+        client_timestamp_str = data.get("client_timestamp")
+        client_now = datetime.fromisoformat(
+            client_timestamp_str.replace("Z", "+00:00")) if client_timestamp_str else datetime.now()
+
+        planner_engine.run_planner_engine(user_id, {}, now_dt=client_now)
+
+        return jsonify({"status": "success", "message": "Item saved and schedule updated."})
+
+    except Exception as e:
+        print(f"Error in manual_save_item: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/delete_event", methods=["POST"])
+def delete_event():
+    if "user_id" not in session: return jsonify({"error": "Not logged in"}), 401
+
+    uid = session["user_id"]
+    data = request.json
+
+    item_type = data.get("type")  # 'plan', 'task', or 'test'
+    name = data.get("title")
+
+    # CASE A: Delete a generated study block (Blue)
+    if item_type == "plan":
+        date = data.get("start").split("T")[0]
+        time_part = data.get("start").split("T")[1][:5]  # HH:MM
+        db_service.delete_single_block(uid, name, date, time_part)
+        return jsonify({"status": "success", "message": "Study block removed."})
+
+    # CASE B: Delete the actual Task/Test (Red/Orange)
+    else:
+        # Strip prefixes like "DUE: " or "TEST: "
+        clean_name = name.replace("DUE: ", "").replace("TEST: ", "")
+        db_service.delete_schedule_item(uid, clean_name)
+        # Re-run planner to remove orphan blocks
+        planner_engine.run_planner_engine(uid, {}, now_dt=datetime.now())
+        return jsonify({"status": "success", "message": f"Task '{clean_name}' and its sessions deleted."})
+
+
+@app.route("/api/mark_event_done", methods=["POST"])
+def mark_event_done():
+    if "user_id" not in session: return jsonify({"error": "Not logged in"}), 401
+    uid = session["user_id"]
+    data = request.json
+
+    # Only applies to 'plan' items
+    name = data.get("title")
+    date = data.get("start").split("T")[0]
+    time_part = data.get("start").split("T")[1][:5]
+
+    db_service.mark_block_done(uid, name, date, time_part)
+    return jsonify({"status": "success", "message": "Session marked as done!"})
 
 
 if __name__ == "__main__":

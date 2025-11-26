@@ -195,3 +195,40 @@ class DBService:
                 }
             }
         )
+
+        def delete_single_block(self, user_id, task_name, date_str, start_time):
+            """Removes a specific study block from the generated_plan array."""
+            result = self.users_collection.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$pull": {"generated_plan": {
+                    "task": task_name,
+                    "date": date_str,
+                    "start_time": start_time
+                }}}
+            )
+            return result.modified_count > 0
+
+        def mark_block_done(self, user_id, task_name, date_str, start_time):
+            """Marks a specific study block as completed (green)."""
+            result = self.users_collection.update_one(
+                {
+                    "_id": ObjectId(user_id),
+                    "generated_plan": {
+                        "$elemMatch": {
+                            "task": task_name,
+                            "date": date_str,
+                            "start_time": start_time
+                        }
+                    }
+                },
+                {"$set": {"generated_plan.$.completed": True}}
+            )
+            return result.modified_count > 0
+
+    def mark_setup_complete(self, user_id):
+        """Flags the user's account as having finished the AI setup phase."""
+        result = self.users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"setup_complete": True}}
+        )
+        return result.modified_count > 0

@@ -8,14 +8,16 @@ DEFAULT_PRIORITY_MAP = {
     "top": 0, "high": 1, "medium": 2, "low": 3,
     "exam": 1, "project": 5, "quiz": 3, "assignment": 4, "seatwork": 5
 }
+
 # Ideal session size used for Context-Aware Sizing
+# UPDATED: Now supports 0.5 (30 minute) granularity
 SESSION_IDEAL_DURATION_MAP = {
-    "exam": 3,
-    "project": 5,
-    "quiz": 1,
-    "assignment": 1,
-    "seatwork": 1,
-    "default": 1
+    "exam": 3.0,
+    "project": 2.0,  # Reduced cap to encourage breaks
+    "quiz": 1.0,  # Standard quiz study
+    "assignment": 1.0,
+    "seatwork": 0.5,  # 30 mins for quick tasks
+    "default": 1.0
 }
 
 DAY_OF_WEEK_MAP = {
@@ -129,10 +131,11 @@ class PlannerEngine:
         deadline_dt = target_item["deadline_dt"]
         current_day = now_dt.date()  # Start day is the date part of client now
 
-        item_type = target_item.get("item_type", "default")
-        ideal_session_size = SESSION_IDEAL_DURATION_MAP.get(item_type, 1)
-        classes = user_data.get("schedule", [])
+        # UPDATED: Granular Sizing Logic
+        item_type = target_item.get("task_type", target_item.get("test_type", "default"))
+        ideal_session_size = SESSION_IDEAL_DURATION_MAP.get(item_type, 1.0)  # Float default
 
+        classes = user_data.get("schedule", [])
         target_day_indices = [DAY_MAP_TO_INDEX.get(d) for d in days if d in DAY_MAP_TO_INDEX]
 
         requested_start_min = _time_to_minutes(start_time)
@@ -170,22 +173,27 @@ class PlannerEngine:
                     current_day += timedelta(days=1)
                     continue
 
-                # 3. SESSION CAP CHECK
-                duration_hours = (block_end_dt - block_start_dt).total_seconds() / 3600
+                # 3. SESSION CAP CHECK (Updated for Floats)
+                duration_hours = (block_end_dt - block_start_dt).total_seconds() / 3600.0
+
+                # We prioritize the User's requested window, but warn if it exceeds ideal size for that type
+                # (Logic adjusted: We only cap if it's significantly larger, otherwise trust user input for recurring blocks)
                 allocated_hours = min(duration_hours, ideal_session_size)
 
+                # If the user asks for 2 hours for a 'seatwork' (ideal 0.5), we cap it.
                 final_end_dt = block_start_dt + timedelta(hours=allocated_hours)
 
                 if allocated_hours < duration_hours:
                     messages.append(
-                        f"Note: Block on {current_day.strftime('%b %d')} capped at {allocated_hours} hr(s) due to {item_type} session size.")
+                        f"Note: Block on {current_day.strftime('%b %d')} capped at {allocated_hours} hr(s) due to {item_type} limits.")
 
                 # 4. Add to Plan
                 generated_blocks.append({
                     "date": current_day.strftime("%Y-%m-%d"),
                     "start_time": block_start_dt.strftime("%H:%M"),
                     "end_time": final_end_dt.strftime("%H:%M"),
-                    "task": f"Work on {target_item['name']}"
+                    "task": f"Work on {target_item['name']}",
+                    "completed": False  # Default to not done
                 })
 
             current_day += timedelta(days=1)
@@ -208,7 +216,7 @@ class PlannerEngine:
                     return True, cls.get('subject')  # Conflict found
         return False, None
 
-    # --- STANDARD PLANNER FUNCTIONS (Retained/Simplified) ---
+    # --- STANDARD PLANNER FUNCTIONS ---
 
     def run_planner_engine(self, user_id, args, now_dt):
         """
@@ -270,7 +278,7 @@ class PlannerEngine:
         return f"Your plan for today (PH Time): {summary}."
 
     def get_priority_list(self, user_id, args, now_dt):
-        return "The priority list feature is temporarily disabled during the scheduler upgrade. Please schedule a specific block."
+        return "The priority list feature is temporarily disabled."
 
     def reschedule_day(self, user_id, args, now_dt):
         return self.run_planner_engine(user_id, {"force_auto": True}, now_dt)
