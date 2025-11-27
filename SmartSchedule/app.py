@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from db_service import DBService
 from planner_engine import PlannerEngine
-#dred sar-ap-ap
+
 # Load .env file
 load_dotenv(find_dotenv(), override=True)
 
@@ -286,7 +286,7 @@ def signup():
             "preferences": {"awake_time": "07:00", "sleep_time": "23:00"},
             "chat_history": [],
             "generated_plan": [],
-            "onboarding_complete": False,
+            # Removed onboarding_complete
             "setup_complete": False  # Default to False
         })
         return redirect(url_for("login"))
@@ -324,15 +324,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-# --- API ROUTE TO DISMISS ONBOARDING ---
-@app.route("/onboarding_dismiss", methods=["POST"])
-def onboarding_dismiss():
-    if "user_id" not in session:
-        return jsonify({"error": "Not logged in"}), 401
-
-    user_id = session["user_id"]
-    db_service.set_onboarding_complete(user_id, True)
-    return jsonify({"status": "acknowledged"})
+# REMOVED: /onboarding_dismiss route
 
 
 # ---------- MAIN APP ROUTES ----------
@@ -343,32 +335,7 @@ def index():
     return render_template("index.html", username=session["username"])
 
 
-@app.route("/save_personalization", methods=["POST"])
-def save_personalization():
-    if "user_id" not in session:
-        return jsonify({"error": "Not logged in"}), 401
-
-    user_id = session["user_id"]
-    data = request.json
-
-    try:
-        client_timestamp_str = request.json.get("client_timestamp")
-        client_now = datetime.fromisoformat(
-            client_timestamp_str.replace("Z", "+00:00")) if client_timestamp_str else datetime.now()
-
-        preferences = data.get("preferences", {})
-        db_service.update_user_preference(user_id, preferences)
-
-        db_service.set_onboarding_complete(user_id, True)
-
-        # Run planner after saving preferences
-        planner_response = planner_engine.run_planner_engine(user_id, {}, now_dt=client_now)
-
-        return jsonify({"reply": f"Settings saved! {planner_response['message']}"})
-
-    except Exception as e:
-        print(f"Error in /save_personalization: {e}")
-        return jsonify({"reply": "Sorry, there was an error saving your settings."}), 500
+# REMOVED: /save_personalization route (Optional: Keep if you want API support, but unnecessary without modal)
 
 
 @app.route("/chat", methods=["POST"])
@@ -556,7 +523,7 @@ def get_schedule():
         "tests": user_data.get("tests", []),
         "generated_plan": user_data.get("generated_plan", []),
         "preferences": user_data.get("preferences", {}),
-        "onboarding_complete": user_data.get("onboarding_complete", False),
+        # Removed onboarding_complete
         "setup_complete": user_data.get("setup_complete", False)  # Pass lock status to frontend
     }
     return jsonify(schedule_data)

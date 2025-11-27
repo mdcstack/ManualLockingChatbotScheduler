@@ -7,13 +7,14 @@ class DBService:
     """
     Handles all interactions with the MongoDB collections (users, tasks, etc.).
     REVISED: Removed temporary user_defined_blocks fields and methods.
+    REVISED: Removed onboarding_complete logic (Personalization Modal dropped).
     """
 
     def __init__(self, db_connection):
         self.db = db_connection
         self.users_collection = self.db["users"]
 
-    # --- INTERNAL HELPER (Retained) ---
+    # --- INTERNAL HELPER ---
     def _parse_deadline_to_aware(self, item):
         """Helper to convert task/test deadline strings to timezone-aware datetime objects."""
         deadline_str = item.get("deadline", item.get("date"))
@@ -29,7 +30,7 @@ class DBService:
         except ValueError:
             return None
 
-    # --- TOKEN-SAVING READ OPERATION (Retained) ---
+    # --- READ OPERATIONS ---
 
     def get_active_context_data(self, user_id, now_dt):
         """
@@ -64,20 +65,19 @@ class DBService:
 
         return pruned_context
 
-    # --- DELETED: add_user_defined_block and clear_user_defined_blocks methods ---
-
-    # --- ORIGINAL READ/WRITE OPERATIONS (Retained) ---
-    def set_onboarding_complete(self, user_id, status):
-        """Sets the onboarding status flag for the user."""
-        result = self.users_collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": {"onboarding_complete": status}}
-        )
-        return result.modified_count > 0
-
     def get_user_data(self, user_id):
         """Fetches all user data by ObjectId."""
         return self.users_collection.find_one({"_id": ObjectId(user_id)})
+
+    # --- WRITE OPERATIONS ---
+
+    def mark_setup_complete(self, user_id):
+        """Flags the user's account as having finished the AI setup phase."""
+        result = self.users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"setup_complete": True}}
+        )
+        return result.modified_count > 0
 
     def update_user_preference(self, user_id, preferences):
         """Saves awake and sleep time preferences."""
@@ -196,39 +196,33 @@ class DBService:
             }
         )
 
-        def delete_single_block(self, user_id, task_name, date_str, start_time):
-            """Removes a specific study block from the generated_plan array."""
-            result = self.users_collection.update_one(
-                {"_id": ObjectId(user_id)},
-                {"$pull": {"generated_plan": {
-                    "task": task_name,
-                    "date": date_str,
-                    "start_time": start_time
-                }}}
-            )
-            return result.modified_count > 0
+    # --- MANUAL DELETE & MARK DONE ---
 
-        def mark_block_done(self, user_id, task_name, date_str, start_time):
-            """Marks a specific study block as completed (green)."""
-            result = self.users_collection.update_one(
-                {
-                    "_id": ObjectId(user_id),
-                    "generated_plan": {
-                        "$elemMatch": {
-                            "task": task_name,
-                            "date": date_str,
-                            "start_time": start_time
-                        }
-                    }
-                },
-                {"$set": {"generated_plan.$.completed": True}}
-            )
-            return result.modified_count > 0
-
-    def mark_setup_complete(self, user_id):
-        """Flags the user's account as having finished the AI setup phase."""
+    def delete_single_block(self, user_id, task_name, date_str, start_time):
+        """Removes a specific study block from the generated_plan array."""
         result = self.users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {"$set": {"setup_complete": True}}
+            {"$pull": {"generated_plan": {
+                "task": task_name,
+                "date": date_str,
+                "start_time": start_time
+            }}}
+        )
+        return result.modified_count > 0
+
+    def mark_block_done(self, user_id, task_name, date_str, start_time):
+        """Marks a specific study block as completed (green)."""
+        result = self.users_collection.update_one(
+            {
+                "_id": ObjectId(user_id),
+                "generated_plan": {
+                    "$elemMatch": {
+                        "task": task_name,
+                        "date": date_str,
+                        "start_time": start_time
+                    }
+                }
+            },
+            {"$set": {"generated_plan.$.completed": True}}
         )
         return result.modified_count > 0

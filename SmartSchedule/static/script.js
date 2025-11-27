@@ -20,8 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 3. Setup Modal Listeners
-    setupModalListeners();
+    // 3. Setup Manual Entry Modal
     setupManualEntryListeners();
 
     // 4. Setup Notification Popup
@@ -36,46 +35,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // === CALENDAR INITIALIZATION LOGIC ===
 
-function calculateCalendarView(preferences) {
-    const awakeTimeStr = preferences.awake_time || '00:00';
-    const sleepTimeStr = preferences.sleep_time || '23:00';
-
-    function subtractHour(timeStr) {
-        let [h, m] = timeStr.split(':').map(Number);
-        h = (h - 1 + 24) % 24;
-        return `${String(h).padStart(2, '0')}:00:00`;
-    }
-
-    function determineMaxSlot(timeStr) {
-        let [h, m] = timeStr.split(':').map(Number);
-        h = (h + 1) % 24;
-
-        if (h === 0 && sleepTimeStr === '23:00') {
-            return '24:00:00';
-        }
-
-        return `${String(h).padStart(2, '0')}:00:00`;
-    }
-
-    const slotMinTime = subtractHour(awakeTimeStr);
-    const slotMaxTime = determineMaxSlot(sleepTimeStr);
-
-    return { slotMinTime, slotMaxTime };
-}
-
-function initializeCalendar(preferences) {
-    const { slotMinTime, slotMaxTime } = calculateCalendarView(preferences);
-
+function initializeCalendar() {
     const calendarEl = document.getElementById('calendar');
     calendar = new FullCalendar.Calendar(calendarEl, {
         initialView: 'timeGridWeek',
+
+        // --- CUSTOM BUTTONS (Manual Add) ---
+        customButtons: {
+            addTaskButton: {
+                text: '+ Add Task',
+                click: function() {
+                    // Logic to open the manual entry modal
+                    const modal = document.getElementById('manualTaskModal');
+                    const dateInput = document.getElementById('manual-task-deadline');
+
+                    // Set min date to today
+                    const now = new Date();
+                    const year = now.getFullYear();
+                    const month = String(now.getMonth() + 1).padStart(2, '0');
+                    const day = String(now.getDate()).padStart(2, '0');
+                    dateInput.min = `${year}-${month}-${day}`;
+
+                    // Open Modal
+                    modal.classList.remove('hidden');
+                }
+            }
+        },
         headerToolbar: {
             left: 'prev,next today',
             center: 'title',
-            right: 'dayGridMonth,timeGridWeek,timeGridDay'
+            right: 'addTaskButton dayGridMonth,timeGridWeek,timeGridDay'
         },
-        slotMinTime: slotMinTime,
-        slotMaxTime: slotMaxTime,
+
+        // --- HARDCODED TIME RANGE (1am - 11pm) ---
+        slotMinTime: '01:00:00',
+        slotMaxTime: '23:00:00',
+        // -----------------------------------------
+
         allDaySlot: true,
         height: '100%',
         events: fetchCalendarEvents,
@@ -98,41 +94,14 @@ async function fetchAndInitialize() {
     }
     scheduleData = data;
 
-    const prefs = scheduleData.preferences || {};
-    initializeCalendar(prefs);
+    // Initialize Calendar (No preferences passed)
+    initializeCalendar();
 
-    const isFirstLogin = !scheduleData.onboarding_complete;
-
-    if (isFirstLogin) {
-        openModalOnFirstLogin();
-    }
-
-    // --- NEW: Check if Setup is Complete (Load Dashboard Mode) ---
+    // --- Check if Setup is Complete (Load Dashboard Mode) ---
     if (scheduleData.setup_complete) {
         enableDashboardMode();
     }
-    // -------------------------------------------------------------
-}
-
-function openModalOnFirstLogin() {
-    const modal = document.getElementById('personalizationModal');
-    if (modal) {
-        loadPersonalizationData();
-        modal.classList.remove('hidden');
-    }
-}
-
-// --- Mark onboarding as dismissed ---
-async function markOnboardingDismissed() {
-    if (!scheduleData.onboarding_complete) {
-        try {
-            await fetch('/onboarding_dismiss', { method: 'POST' });
-            scheduleData.onboarding_complete = true;
-            console.log("Onboarding dismissed and marked complete in DB.");
-        } catch (e) {
-            console.error("Error marking onboarding dismissed:", e);
-        }
-    }
+    // -------------------------------------------------------
 }
 
 
@@ -144,18 +113,15 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
-    const oldPrefs = scheduleData.preferences;
+    // Update local data
     scheduleData = data;
-
-    if (JSON.stringify(oldPrefs) !== JSON.stringify(data.preferences)) {
-        if (calendar) calendar.destroy();
-        initializeCalendar(data.preferences);
-    }
 
     // If setup is complete (e.g. user refreshed page), ensure UI matches
     if (scheduleData.setup_complete) {
         const chatContainer = document.querySelector('.chat-container');
-        if (chatContainer && chatContainer.style.display !== 'none') {
+        // We check if input is disabled to avoid re-running if already done
+        const inputField = document.getElementById('user-input');
+        if (inputField && !inputField.disabled) {
             enableDashboardMode();
         }
     }
@@ -366,71 +332,6 @@ function openPriorityModal(options) {
     modal.classList.remove('hidden');
 }
 
-const closeModal = () => {
-    const modal = document.getElementById('personalizationModal');
-    if (modal) {
-        if (!scheduleData.onboarding_complete) {
-            markOnboardingDismissed();
-        }
-        modal.classList.add('hidden');
-    }
-};
-
-function setupModalListeners() {
-  const settingsButton = document.getElementById('settings-button');
-  const closeButton = document.getElementById('modal-close-button');
-  const cancelButton = document.getElementById('modal-cancel-button');
-  const saveButton = document.getElementById('modal-save-button');
-
-  const openModal = () => {
-    document.getElementById('personalizationModal').classList.remove('hidden');
-    loadPersonalizationData();
-  }
-
-  if(settingsButton) settingsButton.addEventListener('click', openModal);
-
-  if(closeButton) closeButton.addEventListener('click', closeModal);
-  if(cancelButton) cancelButton.addEventListener('click', closeModal);
-
-  if(saveButton) saveButton.addEventListener('click', savePersonalization);
-}
-
-
-async function loadPersonalizationData() {
-    await fetchCalendarEvents({}, () => {}, () => {});
-
-    try {
-        if(scheduleData.preferences) {
-            document.getElementById('awake-time').value = scheduleData.preferences.awake_time || '07:00';
-            document.getElementById('sleep-time').value = scheduleData.preferences.sleep_time || '23:00';
-        }
-    } catch (e) { console.error(e); }
-}
-
-async function savePersonalization() {
-    const awakeTime = document.getElementById('awake-time').value;
-    const sleepTime = document.getElementById('sleep-time').value;
-
-    const clientTimestamp = new Date().toISOString();
-
-    try {
-      const res = await fetch('/save_personalization', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            preferences: { awake_time: awakeTime, sleep_time: sleepTime },
-            client_timestamp: clientTimestamp
-        })
-      });
-      const result = await res.json();
-      handleChatResponse(result);
-      document.getElementById('personalizationModal').classList.add('hidden');
-
-      if (calendar) calendar.refetchEvents();
-
-    } catch (e) { console.error(e); }
-}
-
 function toggleNotificationPopup() {
     const popup = document.getElementById('notificationPopup');
     popup.style.display = (popup.style.display === 'block') ? 'none' : 'block';
@@ -465,7 +366,6 @@ function updateNotificationList() {
 
 function setupManualEntryListeners() {
     const modal = document.getElementById('manualTaskModal');
-    const openBtn = document.getElementById('add-task-button');
     const closeBtn = document.getElementById('manual-task-close');
     const cancelBtn = document.getElementById('manual-task-cancel');
     const saveBtn = document.getElementById('manual-task-save');
@@ -478,23 +378,7 @@ function setupManualEntryListeners() {
         document.getElementById('manual-task-priority').value = '';
     };
 
-    if (openBtn) {
-        openBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-
-            // Block Past Dates (YYYY-MM-DD)
-            const dateInput = document.getElementById('manual-task-deadline');
-            const now = new Date();
-            const year = now.getFullYear();
-            const month = String(now.getMonth() + 1).padStart(2, '0');
-            const day = String(now.getDate()).padStart(2, '0');
-
-            // Set min to today's date (local time)
-            dateInput.min = `${year}-${month}-${day}`;
-
-            modal.classList.remove('hidden');
-        });
-    }
+    // Note: The "Open" listener is now inside FullCalendar's customButtons
 
     if (closeBtn) closeBtn.addEventListener('click', closeManualModal);
     if (cancelBtn) cancelBtn.addEventListener('click', closeManualModal);
@@ -573,7 +457,6 @@ function openEventModal(event) {
         type: event.extendedProps.type || 'task'
     };
 
-    // UI Updates
     // UI Updates
     titleEl.textContent = event.title;
 
@@ -679,7 +562,4 @@ function enableDashboardMode() {
     if (chatBox) {
         chatBox.scrollTop = chatBox.scrollHeight;
     }
-
-    // NOTE: We are intentionally NOT hiding the .chat-container
-    // or resizing the calendar so the history remains visible.
 }
