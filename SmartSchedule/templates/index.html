@@ -52,6 +52,32 @@
   </style>
 </head>
 <body>
+<div id="pdfWarningModal" class="modal-backdrop hidden">
+  <div class="modal-content" style="max-width: 400px;">
+    <div class="modal-header"><h3>Incomplete Setup</h3></div>
+    <div class="modal-body">
+      <p>To generate a PDF, please tell the chatbot "I'm done" to finalize your schedule first.</p>
+    </div>
+    <div class="modal-footer">
+      <button id="pdf-warn-cancel" class="modal-button-secondary">Cancel</button>
+      <button id="pdf-warn-continue" class="modal-button-primary">Continue Anyway</button>
+    </div>
+  </div>
+</div>
+
+<div id="pdfConfirmModal" class="modal-backdrop hidden">
+  <div class="modal-content" style="max-width: 400px;">
+    <div class="modal-header"><h3>Confirm & Clear</h3></div>
+    <div class="modal-body">
+      <p>Are you sure? This action will download your PDF and **permanently clear** your current schedule to start fresh.</p>
+    </div>
+    <div class="modal-footer">
+      <button id="pdf-confirm-no" class="modal-button-secondary">No, Cancel</button>
+      <button id="pdf-confirm-yes" class="modal-button-primary" style="background-color: #ef4444;">Yes, Generate & Clear</button>
+    </div>
+  </div>
+</div>
+
 
   <div id="calendar-container">
     <div id='calendar'></div>
@@ -60,6 +86,9 @@
   <div class="chat-container">
     <div class="welcome-header">
       <h2>Welcome, {{ username }}!</h2>
+      <button id="btn-generate-pdf" class="modal-button-secondary" style="font-size: 0.8rem; padding: 4px 8px; margin-right: 10px;">
+    Generate PDF
+  </button>
       <div class="notification-icon-container">
           <svg id="notification-bell" class="notification-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" onclick="toggleNotificationPopup()">
             <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/>
@@ -76,7 +105,18 @@
     <div class="header-links">
       <a href="{{ url_for('logout') }}">Logout</a>
       </div>
-    <div id="chat-box"></div>
+    <div id="chat-box">
+  <div id="chat-guide" class="message bot-message" style="background: #f0f4ff; border: 1px dashed #4f46e5; margin-bottom: 10px;">
+    <p><strong>👋 Hi, {{ username }} </strong></p>
+    <p>To build your schedule, please provide:</p>
+    <ul style="padding-left: 20px; font-size: 0.85rem; margin: 10px 0;">
+      <li><b>Tasks:</b> "I have a History Essay due next Friday."</li>
+      <li><b>Tests:</b> "I have a Math Exam on Jan 20th."</li>
+      <li><b>Preferences:</b> "Study for Math every Mon and Wed from 3pm to 5pm."</li>
+    </ul>
+    <p><small><em>When you are finished adding everything, say <b>"I'm done"</b> to generate your final plan.</em></small></p>
+  </div>
+</div>
 
     <div class="input-area">
       <input id="user-input" type="text" placeholder="Type a message..." />

@@ -31,6 +31,21 @@ document.addEventListener('DOMContentLoaded', () => {
             closeNotificationPopup();
         }
     });
+
+    // 5. PDF Generation Listener (Added here inside DOMContentLoaded)
+    const pdfBtn = document.getElementById('btn-generate-pdf');
+    if (pdfBtn) {
+        pdfBtn.addEventListener('click', () => {
+            if (!scheduleData.setup_complete) {
+                document.getElementById('pdfWarningModal').classList.remove('hidden');
+            } else {
+                document.getElementById('pdfConfirmModal').classList.remove('hidden');
+            }
+        });
+    }
+
+    // Setup PDF Modal Buttons
+    setupPDFModalHandlers();
 });
 
 // === CALENDAR INITIALIZATION LOGIC ===
@@ -45,18 +60,15 @@ function initializeCalendar() {
             addTaskButton: {
                 text: '+ Add Task',
                 click: function() {
-                    // Logic to open the manual entry modal
                     const modal = document.getElementById('manualTaskModal');
                     const dateInput = document.getElementById('manual-task-deadline');
 
-                    // Set min date to today
                     const now = new Date();
                     const year = now.getFullYear();
                     const month = String(now.getMonth() + 1).padStart(2, '0');
                     const day = String(now.getDate()).padStart(2, '0');
                     dateInput.min = `${year}-${month}-${day}`;
 
-                    // Open Modal
                     modal.classList.remove('hidden');
                 }
             }
@@ -67,15 +79,12 @@ function initializeCalendar() {
             right: 'addTaskButton dayGridMonth,timeGridWeek,timeGridDay'
         },
 
-        // --- HARDCODED TIME RANGE (1am - 11pm) ---
         slotMinTime: '01:00:00',
         slotMaxTime: '23:00:00',
-        // -----------------------------------------
 
         allDaySlot: true,
         height: '100%',
         events: fetchCalendarEvents,
-        // Opens the Event Details Modal
         eventClick: function(info) {
             openEventModal(info.event);
         }
@@ -94,16 +103,12 @@ async function fetchAndInitialize() {
     }
     scheduleData = data;
 
-    // Initialize Calendar (No preferences passed)
     initializeCalendar();
 
-    // --- Check if Setup is Complete (Load Dashboard Mode) ---
     if (scheduleData.setup_complete) {
         enableDashboardMode();
     }
-    // -------------------------------------------------------
 }
-
 
 // === CORE DATA FETCHING ===
 async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) {
@@ -113,13 +118,9 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
-    // Update local data
     scheduleData = data;
 
-    // If setup is complete (e.g. user refreshed page), ensure UI matches
     if (scheduleData.setup_complete) {
-        const chatContainer = document.querySelector('.chat-container');
-        // We check if input is disabled to avoid re-running if already done
         const inputField = document.getElementById('user-input');
         if (inputField && !inputField.disabled) {
             enableDashboardMode();
@@ -128,47 +129,40 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
 
     let events = [];
 
-    // A. Map Generated Study Plan (Blue Blocks)
     if (data.generated_plan) {
       data.generated_plan.forEach(item => {
-        // CHECK IF COMPLETED
         const isDone = item.completed === true;
-
         events.push({
           title: item.task,
           start: `${item.date}T${item.start_time}:00`,
           end: `${item.date}T${item.end_time}:00`,
-          // Green if done, Blue if not
           color: isDone ? '#10b981' : '#3788d8',
-          extendedProps: {
-              type: 'plan',
-              isDone: isDone
-          }
+          extendedProps: { type: 'plan', isDone: isDone }
         });
       });
     }
 
-    // B. Map Tasks/Tests Deadlines (Red/Orange All-Day Events)
     if (data.tasks) {
       data.tasks.forEach(item => {
         if (item.deadline) {
            events.push({
              title: `DUE: ${item.name}`,
              start: item.deadline.split('T')[0],
-             color: '#e74c3c', // Red
+             color: '#e74c3c',
              allDay: true,
              extendedProps: { type: 'task' }
            });
         }
       });
     }
+
     if (data.tests) {
         data.tests.forEach(item => {
           if (item.date) {
              events.push({
                title: `TEST: ${item.name}`,
                start: item.date,
-               color: '#d35400', // Orange
+               color: '#d35400',
                allDay: true,
                extendedProps: { type: 'test' }
              });
@@ -176,17 +170,13 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
         });
     }
 
-    // C. Map Classes (Gray Recurring)
     if (data.schedule) {
         const dayMap = { "Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3, "Thursday": 4, "Friday": 5, "Saturday": 6 };
-
         let currentStart = new Date(fetchInfo.start);
-
         for (let d = 0; d < 7; d++) {
             let loopDate = new Date(currentStart);
             loopDate.setDate(loopDate.getDate() + d);
             let dayNameIndex = loopDate.getDay();
-
             data.schedule.forEach(cls => {
                 if (dayMap[cls.day] === dayNameIndex) {
                     let dateStr = loopDate.toISOString().split('T')[0];
@@ -194,14 +184,13 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
                         title: cls.subject,
                         start: `${dateStr}T${cls.start_time}:00`,
                         end: `${dateStr}T${cls.end_time}:00`,
-                        color: '#7f8c8d', // Gray
+                        color: '#7f8c8d',
                         extendedProps: { type: 'class' }
                     });
                 }
             });
         }
     }
-
     successCallback(events);
     updateNotificationList();
   } catch (e) {
@@ -210,13 +199,16 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
   }
 }
 
-// === SEND MESSAGE (Time Aware) ===
+// === SEND MESSAGE ===
 async function sendMessage(messageOverride = null) {
   const input = document.getElementById("user-input");
   const chatBox = document.getElementById("chat-box");
+  const guide = document.getElementById("chat-guide");
   const userMessage = messageOverride || input.value.trim();
 
   if (!userMessage || !chatBox || !input) return;
+
+  if (guide) { guide.style.display = 'none'; }
 
   if (!messageOverride) {
     chatBox.innerHTML += `<div class="message user-message">${userMessage}</div>`;
@@ -226,11 +218,9 @@ async function sendMessage(messageOverride = null) {
 
   input.value = "";
   setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 0);
-
   showThinkingIndicator();
 
   const clientTimestamp = new Date().toISOString();
-
   try {
       const res = await fetch("/chat", {
         method: "POST",
@@ -241,12 +231,9 @@ async function sendMessage(messageOverride = null) {
           client_timestamp: clientTimestamp
         })
       });
-
       removeThinkingIndicator();
-
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-
       handleChatResponse(data);
       if (calendar) calendar.refetchEvents();
   } catch (error) {
@@ -256,11 +243,35 @@ async function sendMessage(messageOverride = null) {
   }
 }
 
+// === PDF MODAL HANDLERS ===
+function setupPDFModalHandlers() {
+    // Modal 1: Warning
+    document.getElementById('pdf-warn-cancel').onclick = () => {
+        document.getElementById('pdfWarningModal').classList.add('hidden');
+    };
+    document.getElementById('pdf-warn-continue').onclick = () => {
+        document.getElementById('pdfWarningModal').classList.add('hidden');
+        document.getElementById('pdfConfirmModal').classList.remove('hidden');
+    };
+
+    // Modal 2: Final Confirmation
+    document.getElementById('pdf-confirm-no').onclick = () => {
+        document.getElementById('pdfConfirmModal').classList.add('hidden');
+    };
+    document.getElementById('pdf-confirm-yes').onclick = async () => {
+        // 1. Trigger Download & Clear
+        window.location.href = '/api/generate_pdf_and_clear';
+
+        // 2. UI Reset
+        document.getElementById('pdfConfirmModal').classList.add('hidden');
+        setTimeout(() => location.reload(), 2000);
+    };
+}
+
 // === UX/MODAL HELPERS ===
 function showThinkingIndicator() {
     const chatBox = document.getElementById("chat-box");
     if (document.getElementById("bot-thinking-indicator")) return;
-
     const thinkingDiv = document.createElement('div');
     thinkingDiv.id = "bot-thinking-indicator";
     thinkingDiv.className = "message bot-message";
@@ -271,9 +282,7 @@ function showThinkingIndicator() {
 
 function removeThinkingIndicator() {
     const indicator = document.getElementById("bot-thinking-indicator");
-    if (indicator) {
-        indicator.remove();
-    }
+    if (indicator) { indicator.remove(); }
 }
 
 function handleChatResponse(data) {
@@ -283,18 +292,12 @@ function handleChatResponse(data) {
         return;
     }
     let formattedReply = data.reply.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-
     chatBox.innerHTML += `<div class="message bot-message">${formattedReply.replace(/\n/g, '<br>')}</div>`;
     setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 0);
 
-    // --- NEW: Check for Lock Action ---
     if (data.action === 'lock_ui') {
-        setTimeout(() => {
-            enableDashboardMode();
-        }, 3000); // Wait 3 seconds so user can read the final message
+        setTimeout(() => { enableDashboardMode(); }, 3000);
     }
-    // ----------------------------------
-
     if (data.action === 'show_priority_modal' && data.options) {
         openPriorityModal(data.options);
     }

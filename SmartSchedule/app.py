@@ -9,7 +9,10 @@ import json
 from datetime import datetime
 from db_service import DBService
 from planner_engine import PlannerEngine
-#ced updated
+from fpdf import FPDF
+from flask import send_file
+import io
+
 # Load .env file
 load_dotenv(find_dotenv(), override=True)
 
@@ -41,6 +44,10 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SYSTEM_PROMPT = """
 You are an 'Intake Specialist' for a study scheduler. Your ONLY goal is to gather a list of tasks, tests, and recurring study preferences from the user.
 
+**PRE-CONFIRMATION CHECK:**
+1.  **Date Sanity:** Before summarizing, check if the date exists (e.g., February 29, 2026, does not exist). If it's invalid, point it out immediately.
+2.  **Subject Legitimacy:** Ensure the subject sounds like a real academic task (e.g., "Computer Hardware" is good; "asdfghj" is not).
+
 **CORE DIRECTIVES:**
 1.  **INTAKE PHASE:** Gather the specific details (Subject, Task Type, Deadline, and Preferred Study Days/Times).
 2.  **CONFIRMATION SUMMARY (CRITICAL):** Before calling any save tools, you MUST present a summary to the user.
@@ -52,7 +59,7 @@ You are an 'Intake Specialist' for a study scheduler. Your ONLY goal is to gathe
 6.  **TIME ANCHOR:** The current date and time is provided in the system message.
 """
 
-# === UPDATED TOOL DEFINITIONS (With finalize_setup) ===
+# === TOOL DEFINITIONS ===
 tools = [
     {
         "type": "function",
@@ -222,8 +229,36 @@ tools = [
 
 
 # ----------------- TOOL EXECUTION MAPPING -----------------
+
+# --- NEW HELPER: VALIDATE DATE BEFORE SAVING ---
+def validate_and_save(uid, category, args):
+    date_str = args.get('deadline') or args.get('date')
+    if date_str:
+        clean_date = date_str.split('T')[0]
+        try:
+            # This checks if the date actually exists in the calendar
+            datetime.strptime(clean_date, "%Y-%m-%d")
+        except ValueError:
+            # Return a clear error message that the AI can read back to the user
+            return {"error": f"The date {clean_date} is invalid (e.g., February 29 is only for leap years)."}
+
+    # Logic for "Legitimate Subjects"
+    subject = args.get('name', '')
+    # You can add a list of forbidden keywords or patterns here
+    if len(subject) < 2:
+        return {"error": "The subject name is too short. Please provide a descriptive name."}
+
+    return db_service.add_schedule_item(uid, category, args)
+
+
 def map_db_update_response(func_name, result, args):
     """Generates a user-friendly response message for DB operations."""
+
+    # --- Check for Validation Error ---
+    if isinstance(result, dict) and "error" in result:
+        return f"Error: {result['error']}"
+    # ----------------------------------
+
     if func_name == "update_task_details":
         if result == 0:
             return f"Sorry, I couldn't find an item named '{args['current_name']}' to update."
@@ -252,8 +287,11 @@ def map_db_update_response(func_name, result, args):
 function_map = {
     "save_preference": lambda uid, args: db_service.update_user_preference(uid, args),
     "save_class": lambda uid, args: db_service.add_schedule_item(uid, "class", args),
-    "save_task": lambda uid, args: db_service.add_schedule_item(uid, "task", args),
-    "save_test": lambda uid, args: db_service.add_schedule_item(uid, "test", args),
+
+    # UPDATED: Use validate_and_save wrapper
+    "save_task": lambda uid, args: validate_and_save(uid, "task", args),
+    "save_test": lambda uid, args: validate_and_save(uid, "test", args),
+
     "update_task_details": lambda uid, args: db_service.update_task_details(uid, args),
     "update_class_schedule": lambda uid, args: db_service.update_class_schedule(uid, args),
     "delete_schedule_item": lambda uid, args: db_service.delete_schedule_item(uid, args.get("item_name")),
@@ -464,7 +502,10 @@ def chat():
                     db_result = func(user_id, arguments)
                     response_msg_for_user = map_db_update_response(function_name, db_result, arguments)
 
-                    if function_name in ["save_task", "save_test", "update_task_details", "delete_schedule_item"]:
+                    # --- Check if validation failed (Error string in response) ---
+                    if isinstance(response_msg_for_user, str) and response_msg_for_user.startswith("Error:"):
+                        run_planner = False  # Do not run planner if date invalid
+                    elif function_name in ["save_task", "save_test", "update_task_details", "delete_schedule_item"]:
                         run_planner = True  # For tasks/tests changes, we still trigger the planner
 
                 messages.append({
@@ -624,6 +665,44 @@ def mark_event_done():
     db_service.mark_block_done(uid, name, date, time_part)
     return jsonify({"status": "success", "message": "Session marked as done!"})
 
+
+@app.route("/api/generate_pdf_and_clear")
+def generate_pdf_and_clear():
+    if "user_id" not in session:
+        return redirect(url_for('login'))
+
+    uid = session["user_id"]
+    user_data = db_service.get_user_data(uid)  # Get current schedule
+
+    # --- 1. Generate PDF in memory ---
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(40, 10, f"Study Schedule for {user_data.get('username')}")
+    pdf.ln(10)
+
+    pdf.set_font("Arial", size=12)
+    # Loop through the generated plan blocks
+    for item in user_data.get("generated_plan", []):
+        text = f"{item['date']} | {item['start_time']} - {item['end_time']}: {item['task']}"
+        pdf.cell(0, 10, text, ln=True)
+
+    # --- 2. Save PDF to a byte stream ---
+    output = io.BytesIO()
+    pdf_output = pdf.output(dest='S').encode('latin-1')
+    output.write(pdf_output)
+    output.seek(0)
+
+    # --- 3. Clear the Database ---
+    db_service.clear_user_schedule(uid)
+
+    # --- 4. Return the file for download ---
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="MySchedule.pdf",
+        mimetype="application/pdf"
+    )
 
 if __name__ == "__main__":
     app.run(debug=True)

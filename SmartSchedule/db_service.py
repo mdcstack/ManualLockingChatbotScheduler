@@ -226,3 +226,17 @@ class DBService:
             {"$set": {"generated_plan.$.completed": True}}
         )
         return result.modified_count > 0
+
+    def clear_user_schedule(self, user_id):
+        """Resets the user's schedule, tasks, and tests."""
+        return self.users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {
+                "schedule": [],
+                "tasks": [],
+                "tests": [],
+                "generated_plan": [],
+                "setup_complete": False,
+                "chat_history": []
+            }}
+        )
