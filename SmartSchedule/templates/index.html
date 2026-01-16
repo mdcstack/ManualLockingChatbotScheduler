@@ -52,6 +52,43 @@
   </style>
 </head>
 <body>
+<div id="conflictModal" class="modal-backdrop hidden">
+  <div class="modal-content" style="max-width: 500px;">
+    <div class="modal-header">
+      <h3 style="color: #ef4444;">⚠ Scheduling Conflict Detected</h3>
+    </div>
+
+    <div class="modal-body">
+      <p style="margin-bottom: 15px; font-size: 0.95rem; color: #374151;">
+        The study block you requested overlaps with an existing event.
+        Please adjust the time below or uncheck the busy days.
+      </p>
+
+      <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+        <div style="flex: 1;">
+          <label style="display: block; font-size: 0.85rem; font-weight: bold; margin-bottom: 5px;">Start Time</label>
+          <input type="time" id="conflict-start-time" class="modal-input" style="width: 100%;">
+        </div>
+        <div style="flex: 1;">
+          <label style="display: block; font-size: 0.85rem; font-weight: bold; margin-bottom: 5px;">End Time</label>
+          <input type="time" id="conflict-end-time" class="modal-input" style="width: 100%;">
+        </div>
+      </div>
+
+      <label style="display: block; font-size: 0.85rem; font-weight: bold; margin-bottom: 10px;">Select Days:</label>
+      <div id="conflict-days-container" style="display: flex; justify-content: space-between; gap: 5px;">
+        </div>
+
+      <p id="conflict-status-msg" style="margin-top: 10px; font-size: 0.85rem; height: 1.2em; color: #ef4444;"></p>
+    </div>
+
+    <div class="modal-footer">
+      <button id="conflict-btn-cancel" class="modal-button-secondary">Cancel Request</button>
+      <button id="conflict-btn-save" class="modal-button-primary">Save Changes</button>
+    </div>
+  </div>
+</div>
+
 
 <div id="pdfWarningModal" class="modal-backdrop hidden">
   <div class="modal-content" style="max-width: 400px;">

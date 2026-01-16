@@ -303,6 +303,13 @@ function handleChatResponse(data) {
     chatBox.innerHTML += `<div class="message bot-message">${formattedReply.replace(/\n/g, '<br>')}</div>`;
     setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 0);
 
+    // --- NEW LOGIC START: CONFLICT DETECTION TRIGGER ---
+    if (data.action === 'show_conflict_modal' && data.modal_data) {
+        // Pass the conflict data payload to the new function
+        openConflictModal(data.modal_data);
+    }
+    // --- NEW LOGIC END ---
+
     if (data.action === 'lock_ui') {
         setTimeout(() => { enableDashboardMode(); }, 3000);
     }
@@ -585,5 +592,196 @@ function enableDashboardMode() {
     const chatBox = document.getElementById("chat-box");
     if (chatBox) {
         chatBox.scrollTop = chatBox.scrollHeight;
+    }
+}
+
+// ==========================================================
+// === NEW MODULE: CONFLICT DETECTION MODAL (TRAFFIC LIGHTS) ===
+// ==========================================================
+
+// Global variable to hold the pending request data from the AI
+let pendingConflictData = null;
+
+// --- 1. OPEN THE MODAL (Called when AI returns "show_conflict_modal") ---
+function openConflictModal(data) {
+    pendingConflictData = data; // Store the original request (Item Name, Deadline, etc.)
+    const modal = document.getElementById('conflictModal');
+
+    // 1. Pre-fill with AI's proposed time
+    document.getElementById('conflict-start-time').value = data.proposed_data.start_time;
+    document.getElementById('conflict-end-time').value = data.proposed_data.end_time;
+
+    // 2. Generate Checkboxes & Run Initial Validation
+    renderTrafficLightCheckboxes();
+    validateTrafficLights(); // Checks the pre-filled time immediately
+
+    modal.classList.remove('hidden');
+}
+
+// --- 2. RENDER CHECKBOXES (One for each day of week) ---
+function renderTrafficLightCheckboxes() {
+    const container = document.getElementById('conflict-days-container');
+    container.innerHTML = '';
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+    days.forEach(day => {
+        const wrapper = document.createElement('div');
+        wrapper.style.display = "flex";
+        wrapper.style.flexDirection = "column";
+        wrapper.style.alignItems = "center";
+        wrapper.style.fontSize = "0.75rem";
+
+        // The Checkbox
+        const cb = document.createElement('input');
+        cb.type = "checkbox";
+        cb.value = day;
+        cb.id = `cb-conflict-${day}`;
+
+        // If AI originally requested this day, check it by default
+        if (pendingConflictData.proposed_data.days.includes(day)) {
+            cb.checked = true;
+        }
+
+        // The Label (e.g., "Mon")
+        const label = document.createElement('span');
+        label.innerText = day.substring(0, 3);
+
+        wrapper.appendChild(cb);
+        wrapper.appendChild(label);
+        container.appendChild(wrapper);
+    });
+
+    // Add Listeners to Time Inputs to trigger re-validation
+    document.getElementById('conflict-start-time').oninput = validateTrafficLights;
+    document.getElementById('conflict-end-time').oninput = validateTrafficLights;
+}
+
+// --- 3. TRAFFIC LIGHT VALIDATION LOGIC (The Core "Red/Green" Check) ---
+function validateTrafficLights() {
+    const startTimeStr = document.getElementById('conflict-start-time').value;
+    const endTimeStr = document.getElementById('conflict-end-time').value;
+
+    if (!startTimeStr || !endTimeStr) return;
+
+    // Convert input times to minutes for easier comparison
+    const startMin = timeToMin(startTimeStr);
+    const endMin = timeToMin(endTimeStr);
+
+    // Loop through each checkbox (Sunday -> Saturday)
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+    days.forEach(day => {
+        const cb = document.getElementById(`cb-conflict-${day}`);
+        const wrapper = cb.parentElement;
+
+        // CHECK 1: Is this day actually free in the user's schedule?
+        const isFree = checkDayFree(day, startMin, endMin);
+
+        if (isFree) {
+            // GREEN LIGHT
+            wrapper.style.color = "#10b981"; // Green text
+            cb.disabled = false;
+            cb.style.accentColor = "#10b981";
+        } else {
+            // RED LIGHT
+            wrapper.style.color = "#ef4444"; // Red text
+            cb.disabled = true;
+            cb.checked = false; // Force uncheck
+            cb.style.accentColor = "#ef4444";
+        }
+    });
+}
+
+// Helper: Check if a specific Weekday has ANY overlap between Now and Deadline
+function checkDayFree(dayName, startMin, endMin) {
+    // 1. Check Fixed Classes (Weekly)
+    const classConflict = scheduleData.schedule.some(cls => {
+        if (cls.day !== dayName) return false;
+        const clsStart = timeToMin(cls.start_time);
+        const clsEnd = timeToMin(cls.end_time);
+        return isOverlap(startMin, endMin, clsStart, clsEnd);
+    });
+    if (classConflict) return false;
+
+    // 2. Check Existing Study Blocks (Specific Dates)
+    // We only check blocks that are NOT the one we are currently trying to schedule
+    const planConflict = scheduleData.generated_plan.some(block => {
+        // Convert block date (YYYY-MM-DD) to Day Name
+        const blockDate = new Date(block.date);
+        const blockDayName = blockDate.toLocaleDateString('en-US', { weekday: 'long' });
+
+        if (blockDayName !== dayName) return false;
+
+        const blockStart = timeToMin(block.start_time);
+        const blockEnd = timeToMin(block.end_time);
+        return isOverlap(startMin, endMin, blockStart, blockEnd);
+    });
+
+    return !planConflict; // Return TRUE if no conflicts found
+}
+
+// Helper: Simple Minute Overlap Check
+function isOverlap(s1, e1, s2, e2) {
+    return s1 < e2 && s2 < e1;
+}
+
+// Helper: "13:30" -> 810 minutes
+function timeToMin(t) {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+}
+
+// --- 4. BUTTON HANDLERS ---
+
+// Updated Zero-Token Cancel Logic
+document.getElementById('conflict-btn-cancel').onclick = () => {
+    document.getElementById('conflictModal').classList.add('hidden');
+    // We simply close the modal. We do not send any message to the AI.
+    // This effectively "rewinds" the state to before the user asked to schedule.
+};
+
+document.getElementById('conflict-btn-save').onclick = async () => {
+    // 1. Gather Revised Data
+    const newStart = document.getElementById('conflict-start-time').value;
+    const newEnd = document.getElementById('conflict-end-time').value;
+
+    const selectedDays = [];
+    document.querySelectorAll('#conflict-days-container input:checked').forEach(cb => {
+        selectedDays.push(cb.value);
+    });
+
+    if (selectedDays.length === 0) {
+        alert("Please select at least one day.");
+        return;
+    }
+
+    // 2. Send "Force Save" Request to Backend
+    // We re-use the original item name from pendingConflictData
+    const payload = {
+        item_name: pendingConflictData.proposed_data.item_name,
+        days: selectedDays,
+        start_time: newStart,
+        end_time: newEnd,
+        force_save: true // New Flag for Backend to skip checks
+    };
+
+    await submitResolvedSchedule(payload);
+
+    document.getElementById('conflictModal').classList.add('hidden');
+};
+
+async function submitResolvedSchedule(payload) {
+    const res = await fetch('/api/resolve_conflict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if(data.status === 'success') {
+         fetchAndInitialize(); // Refresh Calendar
+         // Inform the user via chat (Client-side only message, not sent to AI)
+         const chatBox = document.getElementById("chat-box");
+         chatBox.innerHTML += `<div class="message bot-message">System: Conflict resolved. Schedule saved.</div>`;
+         setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 0);
     }
 }

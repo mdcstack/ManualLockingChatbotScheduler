@@ -10,13 +10,12 @@ DEFAULT_PRIORITY_MAP = {
 }
 
 # Ideal session size used for Context-Aware Sizing
-# UPDATED: Now supports 0.5 (30 minute) granularity
 SESSION_IDEAL_DURATION_MAP = {
     "exam": 3.0,
-    "project": 2.0,  # Reduced cap to encourage breaks
-    "quiz": 1.0,  # Standard quiz study
+    "project": 2.0,
+    "quiz": 1.0,
     "assignment": 1.0,
-    "seatwork": 0.5,  # 30 mins for quick tasks
+    "seatwork": 0.5,
     "default": 1.0
 }
 
@@ -66,7 +65,105 @@ class PlannerEngine:
     def __init__(self, db_service):
         self.db_service = db_service
 
-    # --- TOOL EXECUTION: SCHEDULE RECURRING BLOCKS ---
+    # =========================================================
+    # === NEW: CONFLICT DETECTION LOGIC (The "Pre-Flight Check") ===
+    # =========================================================
+    def detect_conflicts(self, user_id, args, now_dt):
+        """
+        Simulates the schedule to check for overlaps BEFORE saving.
+        Returns: { 'has_conflict': bool, 'details': [strings] }
+        """
+        user_data = self.db_service.get_user_data(user_id)
+
+        # 1. Parse Request
+        item_name = args.get("item_name")
+        target_days = args.get("days", [])
+        start_time_str = args.get("start_time")
+        end_time_str = args.get("end_time")
+
+        # Basic validation
+        if not (target_days and start_time_str and end_time_str):
+            # If missing info, we can't detect conflicts reliably.
+            # Return False so the main tool handles the error naturally.
+            return {"has_conflict": False, "details": []}
+
+        # 2. Find the Deadline
+        all_items = user_data.get("tasks", []) + user_data.get("tests", [])
+
+        # Simple fuzzy match for item name
+        target_item = next((i for i in all_items if i["name"].lower() in item_name.lower()), None)
+
+        deadline_dt = None
+        if target_item:
+            d_str = target_item.get("deadline") or target_item.get("date")
+            if d_str:
+                if 'T' not in d_str: d_str += "T23:59:59"
+                try:
+                    deadline_dt = datetime.fromisoformat(d_str).replace(tzinfo=PH_TZ)
+                except ValueError:
+                    pass
+
+        if not deadline_dt:
+            # If deadline is missing/invalid, we skip conflict check
+            return {"has_conflict": False, "details": []}
+
+        # 3. Simulation Loop
+        conflicts = []
+
+        # Normalize Times to Minutes for comparison
+        req_start_min = _time_to_minutes(start_time_str)
+        req_end_min = _time_to_minutes(end_time_str)
+
+        # Start looking from Tomorrow
+        curr_date = now_dt + timedelta(days=1)
+
+        # Safety cap: don't loop forever if deadline is years away
+        while curr_date <= deadline_dt and (curr_date - now_dt).days < 365:
+            day_name = DAY_OF_WEEK_MAP[curr_date.weekday()]
+
+            if day_name in target_days:
+                date_str = curr_date.strftime("%Y-%m-%d")
+
+                # A. Check Fixed Classes
+                is_class_conflict, cls_subject = self._check_class_conflict(
+                    curr_date, req_start_min, req_end_min, user_data.get("schedule", [])
+                )
+                if is_class_conflict:
+                    conflicts.append(f"{day_name} ({date_str}) overlaps with Class: {cls_subject}")
+
+                # B. Check Existing Study Blocks
+                # We reuse logic similar to class check but for the generated_plan array
+                overlap_study = self._check_study_overlap(
+                    user_data.get("generated_plan", []), date_str, req_start_min, req_end_min, item_name
+                )
+                if overlap_study:
+                    conflicts.append(f"{day_name} ({date_str}) overlaps with Study Session: {overlap_study}")
+
+            curr_date += timedelta(days=1)
+
+        if len(conflicts) > 0:
+            return {"has_conflict": True, "details": conflicts}
+
+        return {"has_conflict": False, "details": []}
+
+    def _check_study_overlap(self, plan_list, date_str, req_start, req_end, current_item_name):
+        """Helper to check overlap against existing generated plans."""
+        for block in plan_list:
+            if block["date"] == date_str:
+                # Don't conflict with itself (if re-scheduling the same task)
+                if current_item_name and current_item_name.lower() in block["task"].lower():
+                    continue
+
+                b_start = _time_to_minutes(block["start_time"])
+                b_end = _time_to_minutes(block["end_time"])
+
+                if _check_overlap(req_start, req_end, b_start, b_end):
+                    return block["task"]
+        return None
+
+    # =========================================================
+    # === EXISTING SCHEDULER LOGIC (Updated to support Force Save) ===
+    # =========================================================
 
     def schedule_recurring_blocks(self, user_id, args, now_dt):
         """
@@ -78,62 +175,64 @@ class PlannerEngine:
         start_time = args.get("start_time")
         end_time = args.get("end_time")
 
+        # NEW: Check if this is a "Force Save" (from the Modal)
+        is_force_save = args.get("force_save", False)
+
         user_data = self.db_service.get_user_data(user_id)
         all_items = user_data.get("tasks", []) + user_data.get("tests", [])
 
-        target_item = next((item for item in all_items if item.get("name").lower() == item_name.lower()), None)
+        target_item = next((item for item in all_items if item.get("name").lower() in item_name.lower()), None)
 
         if not target_item:
             return {"status": "error",
                     "message": f"Sorry, I couldn't find a task or test named '{item_name}'. You must save the task/test first."}
 
-        # Parse the deadline string into a datetime object for internal use
         try:
-            deadline_str = target_item['deadline']
-            if len(deadline_str.split('T')) == 1:
+            deadline_str = target_item.get('deadline') or target_item.get('date')
+            if 'T' not in deadline_str:
                 deadline_str += 'T23:59:59'
             target_item['deadline_dt'] = datetime.fromisoformat(deadline_str).replace(tzinfo=PH_TZ)
         except Exception as e:
             return {"status": "error", "message": "Internal Error: Could not parse task deadline."}
 
-        # 1. Generate new plan entries based on recurrence and constraints
-        new_plan_entries, messages = self._generate_recurring_blocks(user_data, target_item, days, start_time, end_time,
-                                                                     now_dt)
+        # 1. Generate new plan entries
+        new_plan_entries, messages = self._generate_recurring_blocks(
+            user_data, target_item, days, start_time, end_time, now_dt, is_force_save
+        )
 
-        # 2. Consolidate new entries with existing plan entries
+        # 2. Consolidate new entries
         current_plan = user_data.get("generated_plan", [])
 
-        # CRITICAL: Remove any EXISTING plan blocks for this specific item before adding new ones
-        current_plan = [p for p in current_plan if p['task'] != f"Work on {item_name}"]
+        # Remove OLD blocks for this specific item (clean slate for this item)
+        current_plan = [p for p in current_plan if item_name.lower() not in p['task'].lower()]
 
         final_plan = current_plan + new_plan_entries
 
         # 3. Update the DB
         self.db_service.update_generated_plan(user_id, final_plan)
 
-        message = f"Study blocks for '{item_name}' have been scheduled until the deadline."
+        message = f"Study blocks for '{item_name}' have been scheduled."
         if messages:
-            message = "Study blocks scheduled with the following notes: " + " ".join(messages)
+            # If force save, we might suppress some warnings, or show them as notes
+            message += " (Notes: " + "; ".join(messages) + ")"
 
         return {"status": "success", "message": message}
 
     # --- CORE RECURRENCE GENERATION LOGIC ---
 
-    def _generate_recurring_blocks(self, user_data, target_item, days, start_time, end_time, now_dt):
+    def _generate_recurring_blocks(self, user_data, target_item, days, start_time, end_time, now_dt,
+                                   is_force_save=False):
         """
-        Iterates from today until the task deadline, generating and validating
-        blocks for the specified recurring days.
+        Iterates from today until the task deadline, generating blocks.
         """
         generated_blocks = []
         messages = []
 
-        # Use the newly parsed deadline_dt (now a datetime object)
         deadline_dt = target_item["deadline_dt"]
-        current_day = now_dt.date()  # Start day is the date part of client now
+        current_day = now_dt.date()
 
-        # UPDATED: Granular Sizing Logic
         item_type = target_item.get("task_type", target_item.get("test_type", "default"))
-        ideal_session_size = SESSION_IDEAL_DURATION_MAP.get(item_type, 1.0)  # Float default
+        ideal_session_size = SESSION_IDEAL_DURATION_MAP.get(item_type, 1.0)
 
         classes = user_data.get("schedule", [])
         target_day_indices = [DAY_MAP_TO_INDEX.get(d) for d in days if d in DAY_MAP_TO_INDEX]
@@ -141,70 +240,58 @@ class PlannerEngine:
         requested_start_min = _time_to_minutes(start_time)
         requested_end_min = _time_to_minutes(end_time)
 
-        # Loop stops *before* the deadline day begins (midnight)
         stop_date = datetime.combine(deadline_dt.date(), time(0), tzinfo=PH_TZ)
 
-        # Start iterating from today's date
-        while datetime.combine(current_day, time(0), tzinfo=PH_TZ) < stop_date:
+        while datetime.combine(current_day, time(0), tzinfo=PH_TZ) <= stop_date:
 
             if current_day.weekday() in target_day_indices:
 
-                # Setup proposed block times (PH_TZ aware)
+                # Skip today if time has passed
                 block_start_time_naive = time.fromisoformat(start_time)
                 block_end_time_naive = time.fromisoformat(end_time)
-
                 block_start_dt = datetime.combine(current_day, block_start_time_naive, tzinfo=PH_TZ)
                 block_end_dt = datetime.combine(current_day, block_end_time_naive, tzinfo=PH_TZ)
 
-                # 1. PAST TIME CHECK (If scheduling for today)
                 if current_day == now_dt.date() and block_end_dt < now_dt.astimezone(PH_TZ):
-                    messages.append(
-                        f"Skipping {DAY_OF_WEEK_MAP[current_day.weekday()]} block: Time slot has passed today.")
                     current_day += timedelta(days=1)
                     continue
 
-                # 2. CLASS CONFLICT CHECK
-                is_conflict, conflicting_subject = self._check_class_conflict(current_day, requested_start_min,
-                                                                              requested_end_min, classes)
+                # --- CLASS CONFLICT CHECK ---
+                # Logic: If it is Force Save, we SKIP the check (or ignore the result)
+                # Logic: If Normal Save, we check.
+
+                is_conflict = False
+                conflicting_subject = None
+
+                if not is_force_save:
+                    is_conflict, conflicting_subject = self._check_class_conflict(current_day, requested_start_min,
+                                                                                  requested_end_min, classes)
 
                 if is_conflict:
-                    messages.append(
-                        f"Skipping {current_day.strftime('%b %d')} block: Conflict with class '{conflicting_subject}'.")
+                    messages.append(f"Skipping {current_day.strftime('%b %d')}: Conflict with '{conflicting_subject}'.")
                     current_day += timedelta(days=1)
                     continue
 
-                # 3. SESSION CAP CHECK (Updated for Floats)
+                # --- DURATION CAP ---
                 duration_hours = (block_end_dt - block_start_dt).total_seconds() / 3600.0
-
-                # We prioritize the User's requested window, but warn if it exceeds ideal size for that type
-                # (Logic adjusted: We only cap if it's significantly larger, otherwise trust user input for recurring blocks)
                 allocated_hours = min(duration_hours, ideal_session_size)
-
-                # If the user asks for 2 hours for a 'seatwork' (ideal 0.5), we cap it.
                 final_end_dt = block_start_dt + timedelta(hours=allocated_hours)
 
-                if allocated_hours < duration_hours:
-                    messages.append(
-                        f"Note: Block on {current_day.strftime('%b %d')} capped at {allocated_hours} hr(s) due to {item_type} limits.")
-
-                # 4. Add to Plan
+                # Add to Plan
                 generated_blocks.append({
                     "date": current_day.strftime("%Y-%m-%d"),
                     "start_time": block_start_dt.strftime("%H:%M"),
                     "end_time": final_end_dt.strftime("%H:%M"),
                     "task": f"Work on {target_item['name']}",
-                    "completed": False  # Default to not done
+                    "completed": False
                 })
 
             current_day += timedelta(days=1)
 
         return generated_blocks, messages
 
-    # --- CONFLICT CHECK HELPER (Retained) ---
+    # --- CONFLICT CHECK HELPER ---
     def _check_class_conflict(self, block_date_dt, block_start_min, block_end_min, classes):
-        """
-        Checks if the proposed study block conflicts with any user's fixed classes.
-        """
         day_name = DAY_OF_WEEK_MAP.get(block_date_dt.weekday())
 
         for cls in classes:
@@ -213,15 +300,12 @@ class PlannerEngine:
                 class_end_min = _time_to_minutes(cls.get('end_time'))
 
                 if _check_overlap(block_start_min, block_end_min, class_start_min, class_end_min):
-                    return True, cls.get('subject')  # Conflict found
+                    return True, cls.get('subject')
         return False, None
 
     # --- STANDARD PLANNER FUNCTIONS ---
 
     def run_planner_engine(self, user_id, args, now_dt):
-        """
-        Runs the planner for consolidation (retained for generic save_task triggers).
-        """
         now_dt = now_dt.astimezone(PH_TZ)
         user_data = self.db_service.get_user_data(user_id)
 
@@ -235,50 +319,3 @@ class PlannerEngine:
         self.db_service.update_generated_plan(user_id, final_plan)
 
         return {"status": "success", "message": "Plan sorted and validated."}
-
-    def _build_work_queue(self, user_data, now_dt):
-        """Creates a list of pending tasks/tests for constraint checking."""
-        work_items = []
-        all_items = user_data.get("tasks", []) + user_data.get("tests", [])
-        for item in all_items:
-            try:
-                deadline_str = item.get("deadline", item.get("date"))
-                if 'T' not in deadline_str: deadline_str += "T23:59:59"
-                deadline = datetime.fromisoformat(deadline_str).replace(tzinfo=PH_TZ)
-
-                item_type = item.get("task_type", item.get("test_type"))
-
-                work_items.append({
-                    "name": item.get("name"),
-                    "deadline": deadline,
-                    "item_type": item_type
-                })
-            except Exception as e:
-                print(f"Skipping item due to parse error: {item.get('name')}, {e}")
-
-        return work_items
-
-    def get_daily_plan(self, user_id):
-        user_data = self.db_service.get_user_data(user_id)
-        generated_plan = user_data.get("generated_plan", [])
-
-        today_str = datetime.now(PH_TZ).strftime("%Y-%m-%d")
-
-        todays_items = [i for i in generated_plan if i["date"] == today_str]
-
-        if not todays_items:
-            return "You have no study blocks for today."
-
-        summary = ", ".join(
-            f"{i['task']} from {_format_time_12hr(i['start_time'])}"
-            f" to {_format_time_12hr(i['end_time'])}"
-            for i in todays_items
-        )
-
-        return f"Your plan for today (PH Time): {summary}."
-
-    def get_priority_list(self, user_id, args, now_dt):
-        return "The priority list feature is temporarily disabled."
-
-    def reschedule_day(self, user_id, args, now_dt):
-        return self.run_planner_engine(user_id, {"force_auto": True}, now_dt)

@@ -13,7 +13,7 @@ from fpdf import FPDF
 from flask import send_file
 import io
 
-# updated intentional Load .env file updated
+# Load .env file
 load_dotenv(find_dotenv(), override=True)
 
 app = Flask(__name__)
@@ -55,8 +55,9 @@ You are an 'Intake Specialist' for a study scheduler. Your ONLY goal is to gathe
     * Wait for the user to say "Yes" or confirm.
 3.  **EXECUTE ON CONFIRMATION:** Only call `save_task`, `save_test`, or `schedule_recurring_blocks` AFTER the user confirms the summary.
 4.  **FINALIZE:** Once the user indicates they are finished adding ALL items (e.g., "That's all", "I'm done"), call the `finalize_setup` tool.
-5.  **REJECTION:** If the user asks for non-scheduling advice, politely refuse.
-6.  **TIME ANCHOR:** The current date and time is provided in the system message.
+5.  **CONFLICT BLINDNESS (IMPORTANT):** DO NOT check for scheduling conflicts yourself. You do not have the full calculation engine. ALWAYS call the `schedule_recurring_blocks` tool even if you think the time overlaps with a class. The tool will handle the conflict detection.
+6.  **REJECTION:** If the user asks for non-scheduling advice, politely refuse.
+7.  **TIME ANCHOR:** The current date and time is provided in the system message.
 """
 
 # === TOOL DEFINITIONS ===
@@ -251,6 +252,32 @@ def validate_and_save(uid, category, args):
     return db_service.add_schedule_item(uid, category, args)
 
 
+# --- NEW HELPER: CONFLICT DETECTION WRAPPER ---
+def handle_scheduling_wrapper(uid, args, now_dt):
+    """
+    Intercepts the AI's request to schedule blocks.
+    1. Runs a simulation to detect conflicts.
+    2. If conflict -> Returns a specialized dictionary to trigger the UI Modal.
+    3. If clean -> Calls the actual scheduler.
+    """
+    # 1. Run the Pre-Flight Check
+    # Note: This relies on planner_engine having the detect_conflicts method
+    conflict_check = planner_engine.detect_conflicts(uid, args, now_dt)
+
+    if conflict_check["has_conflict"]:
+        # STOP! Do not save. Return instructions for the Frontend.
+        return {
+            "status": "conflict_detected",
+            "action": "show_conflict_modal",
+            "message": "I detected a conflict with existing events.",
+            "proposed_data": args,  # Pass back the original AI suggestion
+            "conflict_details": conflict_check["details"]
+        }
+
+    # 2. No Conflict? Proceed to Save.
+    return planner_engine.schedule_recurring_blocks(uid, args, now_dt)
+
+
 def map_db_update_response(func_name, result, args):
     """Generates a user-friendly response message for DB operations."""
 
@@ -296,12 +323,10 @@ function_map = {
     "update_class_schedule": lambda uid, args: db_service.update_class_schedule(uid, args),
     "delete_schedule_item": lambda uid, args: db_service.delete_schedule_item(uid, args.get("item_name")),
 
-    # New Tool Mapping - Recurring Blocks
-    "schedule_recurring_blocks": lambda uid, args, now_dt: planner_engine.schedule_recurring_blocks(uid, args, now_dt),
+    # UPDATED: Point to the Wrapper instead of the Engine directly
+    "schedule_recurring_blocks": lambda uid, args, now_dt: handle_scheduling_wrapper(uid, args, now_dt),
 
-    # New Tool Mapping - Finalize Setup
     "finalize_setup": lambda uid, args, now_dt: db_service.mark_setup_complete(uid),
-
     "run_planner_engine": lambda uid, args, now_dt: planner_engine.run_planner_engine(uid, args, now_dt),
 }
 
@@ -463,6 +488,7 @@ def chat():
         run_planner = False
         planner_response = None
         action_flag = None
+        conflict_payload = None  # Storage for modal data
 
         if response_message.tool_calls:
             for tool_call in response_message.tool_calls:
@@ -490,12 +516,21 @@ def chat():
 
                 elif function_name == "schedule_recurring_blocks":
                     # schedule_recurring_blocks handles all recurrence logic and triggers the planner internally
-                    planner_response = func(user_id, arguments, client_now)
+                    tool_result = func(user_id, arguments, client_now)
 
-                    if planner_response.get('status') == 'success':
+                    # --- NEW LOGIC: Handle Conflict Action ---
+                    if isinstance(tool_result, dict) and tool_result.get("action") == "show_conflict_modal":
+                        response_msg_for_user = tool_result["message"]
+                        action_flag = "show_conflict_modal"
+                        conflict_payload = tool_result  # Pass the whole object to frontend
+                        # IMPORTANT: Do not set run_planner=True here, as we are waiting for user input
+                    # -----------------------------------------
+                    elif tool_result.get('status') == 'success':
                         response_msg_for_user = "Study plan successfully generated."
+                        # If successful, we might want to check the planner status
+                        planner_response = tool_result
                     else:
-                        response_msg_for_user = planner_response.get("message")
+                        response_msg_for_user = tool_result.get("message")
 
                 else:
                     # Generic DB persistence calls (e.g., save_task)
@@ -512,7 +547,7 @@ def chat():
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": function_name,
-                    "content": response_msg_for_user
+                    "content": str(response_msg_for_user)
                 })
                 reply_to_send = response_msg_for_user
 
@@ -532,6 +567,10 @@ def chat():
         response_payload = {"reply": reply_to_send}
         if action_flag:
             response_payload["action"] = action_flag
+
+        # Inject Conflict Data if flag is set
+        if action_flag == "show_conflict_modal" and conflict_payload:
+            response_payload["modal_data"] = conflict_payload
 
         return jsonify(response_payload)
 
@@ -666,6 +705,37 @@ def mark_event_done():
     return jsonify({"status": "success", "message": "Session marked as done!"})
 
 
+# --- NEW ROUTE: RESOLVE CONFLICT (SAVE FROM MODAL) ---
+@app.route("/api/resolve_conflict", methods=["POST"])
+def resolve_conflict():
+    if "user_id" not in session: return jsonify({"error": "Unauthorized"}), 401
+    uid = session["user_id"]
+    data = request.json
+
+    # 1. Parse Client Time
+    client_timestamp_str = data.get("client_timestamp")  # Ensure frontend sends this or default to now
+    if client_timestamp_str:
+        client_now = datetime.fromisoformat(client_timestamp_str.replace("Z", "+00:00"))
+    else:
+        client_now = datetime.now()
+
+    # 2. Reconstruct Arguments for the Planner
+    # Note: Frontend must send 'days', 'start_time', 'end_time', 'item_name'
+    args = {
+        "item_name": data.get("item_name"),
+        "days": data.get("days"),
+        "start_time": data.get("start_time"),
+        "end_time": data.get("end_time")
+    }
+
+    # 3. Force Save (Bypass Detect Conflicts)
+    # We call the engine directly, skipping the wrapper check because
+    # the user has manually resolved it using the Traffic Lights.
+    result = planner_engine.schedule_recurring_blocks(uid, args, client_now)
+
+    return jsonify(result)
+
+
 # Helper to convert HH:MM to 12-hour format
 def format_12hr(time_str):
     try:
@@ -780,6 +850,7 @@ def generate_pdf_and_clear():
     db_service.clear_user_schedule(uid)  #
 
     return send_file(output, as_attachment=True, download_name="Study_Checklist.pdf", mimetype="application/pdf")
+
 
 if __name__ == "__main__":
     app.run(debug=True)
