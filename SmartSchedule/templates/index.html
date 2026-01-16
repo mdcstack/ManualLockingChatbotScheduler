@@ -52,6 +52,7 @@
   </style>
 </head>
 <body>
+
 <div id="pdfWarningModal" class="modal-backdrop hidden">
   <div class="modal-content" style="max-width: 400px;">
     <div class="modal-header"><h3>Incomplete Setup</h3></div>
@@ -86,9 +87,14 @@
   <div class="chat-container">
     <div class="welcome-header">
       <h2>Welcome, {{ username }}!</h2>
-      <button id="btn-generate-pdf" class="modal-button-secondary" style="font-size: 0.8rem; padding: 4px 8px; margin-right: 10px;">
-    Generate PDF
-  </button>
+      <button id="btn-generate-pdf" class="modal-button-secondary"
+        style="margin-right: 10px; padding: 6px; display: flex; align-items: center; justify-content: center; width: 35px; height: 35px;"
+        title="Download PDF and Clear Schedule">
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+    <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+    <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+  </svg>
+</button>
       <div class="notification-icon-container">
           <svg id="notification-bell" class="notification-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" onclick="toggleNotificationPopup()">
             <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/>

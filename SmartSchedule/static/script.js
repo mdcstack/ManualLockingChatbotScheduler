@@ -177,9 +177,17 @@ async function fetchCalendarEvents(fetchInfo, successCallback, failureCallback) 
             let loopDate = new Date(currentStart);
             loopDate.setDate(loopDate.getDate() + d);
             let dayNameIndex = loopDate.getDay();
+
             data.schedule.forEach(cls => {
                 if (dayMap[cls.day] === dayNameIndex) {
-                    let dateStr = loopDate.toISOString().split('T')[0];
+
+                    // --- FIX START: Use Local Time Construction ---
+                    const year = loopDate.getFullYear();
+                    const month = String(loopDate.getMonth() + 1).padStart(2, '0');
+                    const day = String(loopDate.getDate()).padStart(2, '0');
+                    let dateStr = `${year}-${month}-${day}`;
+                    // --- FIX END ---
+
                     events.push({
                         title: cls.subject,
                         start: `${dateStr}T${cls.start_time}:00`,
@@ -453,35 +461,48 @@ function openEventModal(event) {
     const btnDone = document.getElementById('btn-mark-done');
     const btnDelete = document.getElementById('btn-delete-event');
 
-    // Store data for the buttons to use
+    // Store data for API actions
     currentEventData = {
         title: event.title,
-        start: event.startStr, // ISO string
+        start: event.startStr,
         type: event.extendedProps.type || 'task'
     };
 
     // UI Updates
     titleEl.textContent = event.title;
 
-    // FIX: If it is an All-Day event (Task/Test), hardcode the display to 11:59 PM
+    // Time Display Logic
     if (event.allDay) {
         timeEl.textContent = event.start.toLocaleDateString() + " 11:59 PM";
     } else {
-        // For Study Blocks (Blue), show the actual start time
         timeEl.textContent = event.start.toLocaleString();
     }
 
-    // Logic: Hide "Mark Done" if it's not a study block or already done
-    if (currentEventData.type !== 'plan') {
-        typeEl.textContent = "Type: Deadline / Exam Date";
+    // --- FIX STARTS HERE ---
+
+    // Check specific types instead of a generic "!= plan"
+    if (currentEventData.type === 'class') {
+        typeEl.textContent = "Type: Weekly Class";
+        btnDone.style.display = 'none';
+        btnDelete.textContent = "Delete Class"; // Custom button text for classes
+    }
+    else if (currentEventData.type === 'task') {
+        typeEl.textContent = "Type: Assignment Deadline";
         btnDone.style.display = 'none';
         btnDelete.textContent = "Delete Task & Sessions";
-    } else {
+    }
+    else if (currentEventData.type === 'test') {
+        typeEl.textContent = "Type: Exam / Test Date";
+        btnDone.style.display = 'none';
+        btnDelete.textContent = "Delete Test & Sessions";
+    }
+    else {
+        // This handles 'plan' (Blue Study Blocks)
         typeEl.textContent = "Type: Study Session";
         btnDelete.textContent = "Delete This Session";
 
         if (event.extendedProps.isDone) {
-            btnDone.style.display = 'none'; // Already done
+            btnDone.style.display = 'none';
         } else {
             btnDone.style.display = 'block';
         }

@@ -6,14 +6,14 @@ from openai import OpenAI
 from bson.objectid import ObjectId
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from db_service import DBService
 from planner_engine import PlannerEngine
 from fpdf import FPDF
 from flask import send_file
 import io
 
-# Load .env file
+# updated intentional Load .env file updated
 load_dotenv(find_dotenv(), override=True)
 
 app = Flask(__name__)
@@ -666,43 +666,120 @@ def mark_event_done():
     return jsonify({"status": "success", "message": "Session marked as done!"})
 
 
+# Helper to convert HH:MM to 12-hour format
+def format_12hr(time_str):
+    try:
+        return datetime.strptime(time_str, "%H:%M").strftime("%I:%M %p").lstrip('0')
+    except:
+        return time_str
+
+
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 16)
+        self.set_text_color(79, 70, 229)
+        self.cell(0, 10, 'Your SmartSchedule Weekly Study Guide', 0, 1, 'C')
+        self.ln(5)
+
+    def section_title(self, label):
+        self.set_font('Arial', 'B', 12)
+        self.set_fill_color(243, 244, 246)
+        self.set_text_color(31, 41, 55)
+        self.cell(0, 10, f" {label}", 0, 1, 'L', True)
+        self.ln(2)
+
+    def create_table(self, header, data, col_widths):
+        self.set_fill_color(79, 70, 229)
+        self.set_text_color(255)
+        self.set_font('Arial', 'B', 10)
+        for i, column in enumerate(header):
+            # The '✓' symbol is rendered using the standard encoding if supported,
+            # or you can use a fallback string if your environment lacks the font.
+            self.cell(col_widths[i], 8, column, 1, 0, 'C', True)
+        self.ln()
+
+        self.set_text_color(0)
+        self.set_font('Arial', '', 9)
+        for row in data:
+            if self.get_y() > 260:
+                self.add_page()
+            for i, item in enumerate(row):
+                # Centered alignment for all columns as requested
+                self.cell(col_widths[i], 8, str(item), 1, 0, 'C')
+            self.ln()
+        self.ln(5)
+
+
 @app.route("/api/generate_pdf_and_clear")
 def generate_pdf_and_clear():
-    if "user_id" not in session:
-        return redirect(url_for('login'))
-
+    if "user_id" not in session: return redirect(url_for('login'))
     uid = session["user_id"]
-    user_data = db_service.get_user_data(uid)  # Get current schedule
+    user_data = db_service.get_user_data(uid)
 
-    # --- 1. Generate PDF in memory ---
-    pdf = FPDF()
+    pdf = PDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(40, 10, f"Study Schedule for {user_data.get('username')}")
-    pdf.ln(10)
 
-    pdf.set_font("Arial", size=12)
-    # Loop through the generated plan blocks
-    for item in user_data.get("generated_plan", []):
-        text = f"{item['date']} | {item['start_time']} - {item['end_time']}: {item['task']}"
-        pdf.cell(0, 10, text, ln=True)
+    # --- SECTION 1: RECURRING CLASSES ---
+    if user_data.get("schedule"):
+        pdf.section_title("1. Weekly Recurring Classes")
+        header = ['Day', 'Subject', 'Time Slot']
+        data = [[c['day'], c['subject'], f"{format_12hr(c['start_time'])} - {format_12hr(c['end_time'])}"] for c in
+                user_data["schedule"]]
+        pdf.create_table(header, data, [35, 75, 80])
 
-    # --- 2. Save PDF to a byte stream ---
+    # --- SECTION 2: STUDY PLAN WITH UPDATED HEADERS ---
+    plan = user_data.get("generated_plan", [])
+    if plan:
+        pdf.section_title("2. Personalized Study Checklist")
+
+        weeks = {}
+        for item in plan:
+            dt = datetime.strptime(item['date'], "%Y-%m-%d")
+            monday = dt - timedelta(days=dt.weekday())
+            sunday = monday + timedelta(days=6)
+            week_label = f"{monday.strftime('%b %d')} - {sunday.strftime('%b %d, %Y')}"
+            week_key = monday.strftime("%Y-%m-%d")
+
+            if week_key not in weeks:
+                weeks[week_key] = {"label": week_label, "items": []}
+            weeks[week_key]["items"].append(item)
+
+        all_meta = user_data.get("tasks", []) + user_data.get("tests", [])
+
+        for week_key in sorted(weeks.keys()):
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(0, 8, f"Timeline: {weeks[week_key]['label']}", 0, 1)
+
+            # REVISED HEADER: Using the checkmark symbol
+            header = ['Done [ / ] ', 'Date', 'Duration', 'Task Name']
+            # Note: chr(118) in some encodings or direct '✓' can be used depending on your FPDF font setup.
+
+            data = []
+            for i in weeks[week_key]["items"]:
+                row_date = datetime.strptime(i['date'], "%Y-%m-%d").strftime("%a, %b %d")
+                duration = f"{format_12hr(i['start_time'])} - {format_12hr(i['end_time'])}"
+
+                # Reconstruct Name: "Work on [Type] - [Subject]"
+                raw_subject = i['task'].replace("Work on ", "")
+                meta = next((m for m in all_meta if m['name'] == raw_subject), None)
+                item_type = "Task"
+                if meta:
+                    item_type = meta.get('task_type') or meta.get('test_type') or "Study"
+
+                formatted_task_name = f"Work on {item_type.title()} - {raw_subject}"
+                data.append(["[  ]", row_date, duration, formatted_task_name])
+
+            pdf.create_table(header, data, [25, 35, 55, 75])
+
+    # --- GENERATE AND CLEAR ---
     output = io.BytesIO()
-    pdf_output = pdf.output(dest='S').encode('latin-1')
+    pdf_output = pdf.output(dest='S').encode('latin-1', 'replace')  # Ensure encoding fallback
     output.write(pdf_output)
     output.seek(0)
 
-    # --- 3. Clear the Database ---
-    db_service.clear_user_schedule(uid)
+    db_service.clear_user_schedule(uid)  #
 
-    # --- 4. Return the file for download ---
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name="MySchedule.pdf",
-        mimetype="application/pdf"
-    )
+    return send_file(output, as_attachment=True, download_name="Study_Checklist.pdf", mimetype="application/pdf")
 
 if __name__ == "__main__":
     app.run(debug=True)
